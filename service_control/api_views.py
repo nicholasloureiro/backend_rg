@@ -3047,6 +3047,18 @@ class ServiceOrderListByPhaseAPIView(APIView):
             description="Pesquisa livre (ILIKE) em id (quando numérico), nome do cliente, CPF, nome do evento, funcionário ou atendente",
             required=False,
         ),
+        OpenApiParameter(
+            name="ordering",
+            type=OpenApiTypes.STR,
+            location=OpenApiParameter.QUERY,
+            description=(
+                "Campo(s) para ordenacao. Use '-' para decrescente. "
+                "Campos: order_date, prova_date, retirada_date, devolucao_date, "
+                "total_value, remaining_payment, id, renter__name, event__event_date. "
+                "Padrao: -order_date. Exemplo: ?ordering=-total_value,renter__name"
+            ),
+            required=False,
+        ),
     ],
     methods=["GET"],
     responses={
@@ -3282,6 +3294,26 @@ class ServiceOrderListByPhaseV2APIView(APIView):
 
                 # Use distinct to avoid duplicate ServiceOrder rows due to joins
                 orders_qs = orders_qs.filter(q).distinct()
+
+            # Ordenacao
+            ordering_param = request.GET.get("ordering", "-order_date")
+            ALLOWED_ORDERING_FIELDS = {
+                'order_date', 'prova_date', 'retirada_date', 'devolucao_date',
+                'production_date', 'data_finalizado', 'total_value',
+                'remaining_payment', 'id', 'renter__name', 'event__event_date',
+            }
+
+            ordering_fields = []
+            for field in ordering_param.split(','):
+                field = field.strip()
+                field_name = field.lstrip('-')
+                if field_name in ALLOWED_ORDERING_FIELDS:
+                    ordering_fields.append(field)
+
+            if ordering_fields:
+                orders_qs = orders_qs.order_by(*ordering_fields)
+            else:
+                orders_qs = orders_qs.order_by('-order_date')
 
             # Paginação
             paginator = Paginator(orders_qs, page_size)
@@ -3567,6 +3599,7 @@ class ServiceOrderListByPhaseV2APIView(APIView):
                 "page": page,
                 "page_size": page_size,
                 "total_pages": paginator.num_pages,
+                "ordering": ordering_fields if ordering_fields else ['-order_date'],
                 "results": results,
             }
 
