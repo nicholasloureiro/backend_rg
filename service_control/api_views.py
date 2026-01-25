@@ -3059,6 +3059,19 @@ class ServiceOrderListByPhaseAPIView(APIView):
             ),
             required=False,
         ),
+        OpenApiParameter(
+            name="filter_date",
+            type=OpenApiTypes.DATE,
+            location=OpenApiParameter.QUERY,
+            description=(
+                "Filtra ordens por data especifica. O campo filtrado depende da fase: "
+                "PENDENTE=order_date, EM_PRODUCAO=production_date, "
+                "AGUARDANDO_RETIRADA=retirada_date, AGUARDANDO_DEVOLUCAO=devolucao_date, "
+                "ATRASADO=retirada_date, FINALIZADO=data_finalizado, RECUSADA=data_recusa. "
+                "Formato: YYYY-MM-DD"
+            ),
+            required=False,
+        ),
     ],
     methods=["GET"],
     responses={
@@ -3294,6 +3307,22 @@ class ServiceOrderListByPhaseV2APIView(APIView):
 
                 # Use distinct to avoid duplicate ServiceOrder rows due to joins
                 orders_qs = orders_qs.filter(q).distinct()
+
+            # Filtro por data especifica (campo depende da fase)
+            filter_date = request.GET.get("filter_date")
+            if filter_date:
+                date_field_map = {
+                    'PENDENTE': 'order_date',
+                    'EM_PRODUCAO': 'production_date',
+                    'AGUARDANDO_RETIRADA': 'retirada_date',
+                    'AGUARDANDO_DEVOLUCAO': 'devolucao_date',
+                    'ATRASADO': 'retirada_date',
+                    'FINALIZADO': 'data_finalizado',
+                    'RECUSADA': 'data_recusa',
+                }
+                date_field = date_field_map.get(phase_name)
+                if date_field:
+                    orders_qs = orders_qs.filter(**{date_field: filter_date})
 
             # Ordenacao
             ordering_param = request.GET.get("ordering", "-order_date")
