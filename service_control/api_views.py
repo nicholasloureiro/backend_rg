@@ -3411,7 +3411,7 @@ class ServiceOrderListByPhaseV2APIView(APIView):
                     "remaining_payment": order.remaining_payment,
                     "esta_atrasada": order.esta_atrasada,
                     "renter_role": order.renter_role,
-                    "attendant_name": order.attendant.name if order.attendant else "",
+                    "employee_name": order.employee.name if order.employee else "",
                     "order_date": order.order_date,
                     "prova_date": order.prova_date,
                     "retirada_date": order.retirada_date,
