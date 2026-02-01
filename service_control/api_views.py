@@ -378,7 +378,7 @@ class ServiceOrderUpdateAPIView(APIView):
                             if "pagamentos" in sinal_data and sinal_data["pagamentos"]:
                                 formas = []
                                 payment_details = []
-                                data_sinal = str(service_order.order_date)
+                                data_sinal = timezone.now().isoformat()
                                 for pag in sinal_data["pagamentos"]:
                                     forma = pag.get("forma_pagamento")
                                     amount = pag.get("amount", 0)
