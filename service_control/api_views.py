@@ -1868,7 +1868,17 @@ class ServiceOrderDashboardAPIView(APIView):
             if order.service_order_phase and order.service_order_phase.name == "FINALIZADO":
                 if order.remaining_payment:
                     total_recebido += order.remaining_payment
-        
+
+        # Include virtual payments in total_recebido
+        virtual_orders = ServiceOrder.objects.filter(
+            order_date__gte=filters["data_inicio"],
+            order_date__lte=filters["data_fim"],
+            is_virtual=True,
+        )
+        for order in virtual_orders:
+            if order.advance_payment:
+                total_recebido += order.advance_payment
+
         # Taxa de conversão
         taxa_conversao = round(
             (atendimentos_fechados / total_atendimentos * 100) if total_atendimentos > 0 else 0,
@@ -2301,6 +2311,12 @@ class ServiceOrderDashboardAPIView(APIView):
             if order.service_order_phase == finished_phase and order.remaining_payment:
                 resultados["dia"]["total_recebido"] += float(order.remaining_payment)
 
+        # Dia - add virtual payments
+        virtual_today = ServiceOrder.objects.filter(order_date=today, is_virtual=True)
+        for order in virtual_today:
+            if order.advance_payment:
+                resultados["dia"]["total_recebido"] += float(order.advance_payment)
+
         # Semana - apenas OS confirmadas
         week_orders = ServiceOrder.objects.filter(
             order_date__gte=week_start,
@@ -2316,6 +2332,14 @@ class ServiceOrderDashboardAPIView(APIView):
             if order.service_order_phase == finished_phase and order.remaining_payment:
                 resultados["semana"]["total_recebido"] += float(order.remaining_payment)
 
+        # Semana - add virtual payments
+        virtual_week = ServiceOrder.objects.filter(
+            order_date__gte=week_start, order_date__lte=today, is_virtual=True
+        )
+        for order in virtual_week:
+            if order.advance_payment:
+                resultados["semana"]["total_recebido"] += float(order.advance_payment)
+
         # Mês - apenas OS confirmadas
         month_orders = ServiceOrder.objects.filter(
             order_date__gte=month_start,
@@ -2330,6 +2354,14 @@ class ServiceOrderDashboardAPIView(APIView):
                 resultados["mes"]["total_recebido"] += float(order.advance_payment)
             if order.service_order_phase == finished_phase and order.remaining_payment:
                 resultados["mes"]["total_recebido"] += float(order.remaining_payment)
+
+        # Mês - add virtual payments
+        virtual_month = ServiceOrder.objects.filter(
+            order_date__gte=month_start, order_date__lte=today, is_virtual=True
+        )
+        for order in virtual_month:
+            if order.advance_payment:
+                resultados["mes"]["total_recebido"] += float(order.advance_payment)
 
         return resultados
 
