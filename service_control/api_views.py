@@ -2299,7 +2299,7 @@ class ServiceOrderDashboardAPIView(APIView):
         week_start_str = str(week_start)
         month_start_str = str(month_start)
 
-        # Dia - apenas OS confirmadas
+        # Dia - apenas OS confirmadas (total_pedidos e numero_pedidos)
         today_orders = ServiceOrder.objects.filter(
             order_date=today,
             service_order_phase__name__in=confirmed_phases,
@@ -2308,17 +2308,8 @@ class ServiceOrderDashboardAPIView(APIView):
             if order.total_value:
                 resultados["dia"]["total_pedidos"] += float(order.total_value)
                 resultados["dia"]["numero_pedidos"] += 1
-            if order.advance_payment:
-                resultados["dia"]["total_recebido"] += float(order.advance_payment)
-            # Note: remaining_payment is now summed separately by actual payment date
 
-        # Dia - add virtual payments
-        virtual_today = ServiceOrder.objects.filter(order_date=today, is_virtual=True)
-        for order in virtual_today:
-            if order.advance_payment:
-                resultados["dia"]["total_recebido"] += float(order.advance_payment)
-
-        # Semana - apenas OS confirmadas
+        # Semana - apenas OS confirmadas (total_pedidos e numero_pedidos)
         week_orders = ServiceOrder.objects.filter(
             order_date__gte=week_start,
             order_date__lte=today,
@@ -2328,19 +2319,8 @@ class ServiceOrderDashboardAPIView(APIView):
             if order.total_value:
                 resultados["semana"]["total_pedidos"] += float(order.total_value)
                 resultados["semana"]["numero_pedidos"] += 1
-            if order.advance_payment:
-                resultados["semana"]["total_recebido"] += float(order.advance_payment)
-            # Note: remaining_payment is now summed separately by actual payment date
 
-        # Semana - add virtual payments
-        virtual_week = ServiceOrder.objects.filter(
-            order_date__gte=week_start, order_date__lte=today, is_virtual=True
-        )
-        for order in virtual_week:
-            if order.advance_payment:
-                resultados["semana"]["total_recebido"] += float(order.advance_payment)
-
-        # Mês - apenas OS confirmadas
+        # Mês - apenas OS confirmadas (total_pedidos e numero_pedidos)
         month_orders = ServiceOrder.objects.filter(
             order_date__gte=month_start,
             order_date__lte=today,
@@ -2350,39 +2330,46 @@ class ServiceOrderDashboardAPIView(APIView):
             if order.total_value:
                 resultados["mes"]["total_pedidos"] += float(order.total_value)
                 resultados["mes"]["numero_pedidos"] += 1
-            if order.advance_payment:
-                resultados["mes"]["total_recebido"] += float(order.advance_payment)
-            # Note: remaining_payment is now summed separately by actual payment date
 
-        # Mês - add virtual payments
-        virtual_month = ServiceOrder.objects.filter(
-            order_date__gte=month_start, order_date__lte=today, is_virtual=True
-        )
-        for order in virtual_month:
-            if order.advance_payment:
-                resultados["mes"]["total_recebido"] += float(order.advance_payment)
-
-        # Sum remaining payments by their actual payment date (from payment_details)
-        # Query all finalized orders that have payment_details
-        all_finalized = ServiceOrder.objects.filter(
-            service_order_phase__name="FINALIZADO"
+        # Sum ALL payments by their actual payment date (from payment_details)
+        # This includes both "sinal" and "restante" payments
+        # Query all confirmed orders that have payment_details
+        all_orders_with_payments = ServiceOrder.objects.filter(
+            service_order_phase__name__in=confirmed_phases
         ).exclude(payment_details__isnull=True)
 
-        for order in all_finalized:
+        for order in all_orders_with_payments:
             if order.payment_details and isinstance(order.payment_details, list):
                 for pag in order.payment_details:
-                    if pag.get("tipo") == "restante":
-                        pag_data = pag.get("data", "")
-                        pag_date = pag_data[:10] if pag_data else None
-                        if pag_date:
-                            amt = float(pag.get("amount", 0))
-                            # Check each period
-                            if pag_date == today_str:
-                                resultados["dia"]["total_recebido"] += amt
-                            if week_start_str <= pag_date <= today_str:
-                                resultados["semana"]["total_recebido"] += amt
-                            if month_start_str <= pag_date <= today_str:
-                                resultados["mes"]["total_recebido"] += amt
+                    pag_data = pag.get("data", "")
+                    pag_date = pag_data[:10] if pag_data else None
+                    if pag_date:
+                        amt = float(pag.get("amount", 0))
+                        # Check each period
+                        if pag_date == today_str:
+                            resultados["dia"]["total_recebido"] += amt
+                        if week_start_str <= pag_date <= today_str:
+                            resultados["semana"]["total_recebido"] += amt
+                        if month_start_str <= pag_date <= today_str:
+                            resultados["mes"]["total_recebido"] += amt
+
+        # Also include virtual payments by their payment date
+        virtual_orders = ServiceOrder.objects.filter(is_virtual=True).exclude(
+            payment_details__isnull=True
+        )
+        for order in virtual_orders:
+            if order.payment_details and isinstance(order.payment_details, list):
+                for pag in order.payment_details:
+                    pag_data = pag.get("data", "")
+                    pag_date = pag_data[:10] if pag_data else None
+                    if pag_date:
+                        amt = float(pag.get("amount", 0))
+                        if pag_date == today_str:
+                            resultados["dia"]["total_recebido"] += amt
+                        if week_start_str <= pag_date <= today_str:
+                            resultados["semana"]["total_recebido"] += amt
+                        if month_start_str <= pag_date <= today_str:
+                            resultados["mes"]["total_recebido"] += amt
 
         return resultados
 
