@@ -3929,8 +3929,11 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                             if isinstance(pag_data, str):
                                 pag_date = pag_data[:10]
                                 # Extract time from ISO format (HH:MM:SS)
+                                # Treat midnight (00:00:00) as no time recorded
                                 if len(pag_data) > 10:
-                                    pag_time = pag_data[11:19]
+                                    extracted_time = pag_data[11:19]
+                                    if extracted_time and extracted_time != "00:00:00":
+                                        pag_time = extracted_time
                             else:
                                 pag_date = str(pag_data)[:10]
                         else:
