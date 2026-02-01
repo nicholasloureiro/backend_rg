@@ -3745,6 +3745,25 @@ class VirtualServiceOrderCreateAPIView(APIView):
                 if restante["forma_pagamento"] not in payment_methods:
                     payment_methods.append(restante["forma_pagamento"])
 
+            if data.get("indenizacao"):
+                indenizacao = data["indenizacao"]
+                indenizacao_amount = Decimal(str(indenizacao["amount"]))
+                indenizacao_data = indenizacao.get("data") or timezone.now()
+                if isinstance(indenizacao_data, str):
+                    indenizacao_data_str = indenizacao_data
+                else:
+                    indenizacao_data_str = indenizacao_data.isoformat()
+
+                payment_details.append({
+                    "amount": float(indenizacao_amount),
+                    "forma_pagamento": indenizacao["forma_pagamento"],
+                    "tipo": "indenizacao",
+                    "data": indenizacao_data_str
+                })
+                advance_payment += indenizacao_amount
+                if indenizacao["forma_pagamento"] not in payment_methods:
+                    payment_methods.append(indenizacao["forma_pagamento"])
+
             service_order = ServiceOrder.objects.create(
                 renter=renter,
                 order_date=timezone.now().date(),
@@ -3894,14 +3913,24 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
 
             if adv and float(adv) > 0:
                 if order.payment_details and isinstance(order.payment_details, list):
+                    # Get client name
+                    client_name = None
+                    if order.renter:
+                        client_name = order.renter.name
+
                     for pag in order.payment_details:
                         amt = Decimal(str(pag.get("amount", 0)))
                         pm = pag.get("forma_pagamento", "NÃO INFORMADO")
                         tipo = pag.get("tipo", "sinal")
                         pag_data = pag.get("data")
+                        pag_date = None
+                        pag_time = None
                         if pag_data:
                             if isinstance(pag_data, str):
                                 pag_date = pag_data[:10]
+                                # Extract time from ISO format (HH:MM:SS)
+                                if len(pag_data) > 10:
+                                    pag_time = pag_data[11:19]
                             else:
                                 pag_date = str(pag_data)[:10]
                         else:
@@ -3913,19 +3942,26 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                                 "amount": amt,
                                 "payment_method": pm,
                                 "date": pag_date,
+                                "time": pag_time,
                                 "is_virtual": order.is_virtual,
+                                "client_name": client_name,
+                                "description": order.observations,
                             })
                             total_amount += amt
                 else:
                     amt = Decimal(str(float(adv)))
                     pm = order.payment_method or "NÃO INFORMADO"
+                    client_name = order.renter.name if order.renter else None
                     transactions.append({
                         "order_id": order.id,
                         "transaction_type": "sinal",
                         "amount": amt,
                         "payment_method": pm,
                         "date": order.order_date,
+                        "time": None,
                         "is_virtual": order.is_virtual,
+                        "client_name": client_name,
+                        "description": order.observations,
                     })
                     total_amount += amt
 
@@ -3945,6 +3981,7 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                 if rem and float(rem) > 0:
                     amt = Decimal(str(float(rem)))
                     pm = order.payment_method or "NÃO INFORMADO"
+                    client_name = order.renter.name if order.renter else None
                     transactions.append(
                         {
                             "order_id": order.id,
@@ -3952,7 +3989,10 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                             "amount": amt,
                             "payment_method": pm,
                             "date": order.data_devolvido or order.order_date,
+                            "time": None,
                             "is_virtual": order.is_virtual,
+                            "client_name": client_name,
+                            "description": order.observations,
                         }
                     )
                     total_amount += amt
@@ -3964,6 +4004,9 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
             if key not in totals_by_method:
                 totals_by_method[key] = Decimal("0")
             totals_by_method[key] += Decimal(str(t.get("amount")))
+
+        # Sort transactions by date and time (most recent first)
+        transactions.sort(key=lambda t: (t.get("date") or "", t.get("time") or ""), reverse=True)
 
         # Aplicar paginação às transações
         total_transactions = len(transactions)

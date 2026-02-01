@@ -264,6 +264,7 @@ class VirtualServiceOrderCreateSerializer(serializers.Serializer):
     total_value = serializers.DecimalField(max_digits=10, decimal_places=2, help_text="Valor total")
     sinal = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Pagamento do sinal")
     restante = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Pagamento do restante")
+    indenizacao = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Pagamento de indenização")
     observations = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Observações")
 
 
@@ -571,14 +572,17 @@ class FrontendServiceOrderUpdateSerializer(serializers.Serializer):
 class ServiceOrderFinanceTransactionSerializer(serializers.Serializer):
     order_id = serializers.IntegerField(help_text="ID da ordem de serviço")
     transaction_type = serializers.CharField(
-        help_text="Tipo da transação (sinal/restante)")
+        help_text="Tipo da transação (sinal/restante/indenizacao)")
     amount = serializers.DecimalField(
         max_digits=10, decimal_places=2, help_text="Valor da transação")
     payment_method = serializers.CharField(
         allow_null=True, required=False, help_text="Forma de pagamento")
     date = serializers.DateField(allow_null=True, required=False, help_text="Data da transação")
+    time = serializers.TimeField(allow_null=True, required=False, help_text="Hora da transação")
     is_virtual = serializers.BooleanField(
         required=False, default=False, help_text="Indica se a transação é de uma OS virtual")
+    client_name = serializers.CharField(allow_null=True, required=False, help_text="Nome do cliente")
+    description = serializers.CharField(allow_null=True, required=False, help_text="Descrição/observações")
 
 
 class ServiceOrderFinanceSummarySerializer(serializers.Serializer):
