@@ -1806,6 +1806,7 @@ class ServiceOrderDashboardAPIView(APIView):
         qs = ServiceOrder.objects.filter(
             order_date__gte=filters["data_inicio"],
             order_date__lte=filters["data_fim"],
+            is_virtual=False,
         ).select_related("service_order_phase", "employee", "renter")
         
         # Aplicar filtros opcionais
@@ -2399,6 +2400,7 @@ class ServiceOrderAttendantMetricsAPIView(APIView):
                         employee=atendente,
                         order_date__gte=data_inicio,
                         order_date__lte=today,
+                        is_virtual=False,
                     )
 
                     total_atendimentos = orders.count()
