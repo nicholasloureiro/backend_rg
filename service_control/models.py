@@ -115,6 +115,12 @@ class ServiceOrder(BaseModel):
         default=False,
         help_text="OS virtual apenas para registro de pagamento",
     )
+    client_name = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        help_text="Nome do cliente (para OS virtual sem cliente cadastrado)",
+    )
 
     class Meta:
         db_table = "service_orders"

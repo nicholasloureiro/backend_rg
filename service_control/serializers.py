@@ -261,6 +261,13 @@ class VirtualPaymentItemSerializer(serializers.Serializer):
 class VirtualServiceOrderCreateSerializer(serializers.Serializer):
     """Serializer para criar OS virtual de lançamento de pagamento"""
     renter_id = serializers.IntegerField(required=False, allow_null=True, help_text="ID do cliente (opcional para OS virtual)")
+    client_name = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        max_length=255,
+        help_text="Nome do cliente (quando não cadastrado)"
+    )
     total_value = serializers.DecimalField(max_digits=10, decimal_places=2, help_text="Valor total")
     sinal = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Pagamento do sinal")
     restante = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Pagamento do restante")

@@ -3694,9 +3694,25 @@ class VirtualServiceOrderCreateAPIView(APIView):
             data = serializer.validated_data
 
             renter = None
-            if data.get("renter_id"):
+            client_name = data.get("client_name")
+            renter_id = data.get("renter_id")
+
+            # Validate: exactly one of renter_id or client_name must be provided
+            if renter_id and client_name:
+                return Response(
+                    {"error": "Forneça renter_id ou client_name, não ambos"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if not renter_id and not client_name:
+                return Response(
+                    {"error": "É necessário fornecer renter_id ou client_name"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            if renter_id:
                 try:
-                    renter = Person.objects.get(id=data["renter_id"])
+                    renter = Person.objects.get(id=renter_id)
+                    client_name = None  # Clear client_name if using registered client
                 except Person.DoesNotExist:
                     return Response(
                         {"error": "Cliente não encontrado"},
@@ -3754,6 +3770,7 @@ class VirtualServiceOrderCreateAPIView(APIView):
 
             service_order = ServiceOrder.objects.create(
                 renter=renter,
+                client_name=client_name,
                 order_date=timezone.now().date(),
                 total_value=data["total_value"],
                 advance_payment=advance_payment,
@@ -3902,9 +3919,7 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
             if adv and float(adv) > 0:
                 if order.payment_details and isinstance(order.payment_details, list):
                     # Get client name
-                    client_name = None
-                    if order.renter:
-                        client_name = order.renter.name
+                    client_name = order.renter.name if order.renter else order.client_name
 
                     for pag in order.payment_details:
                         amt = Decimal(str(pag.get("amount", 0)))
@@ -3942,7 +3957,7 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                 else:
                     amt = Decimal(str(float(adv)))
                     pm = order.payment_method or "NÃO INFORMADO"
-                    client_name = order.renter.name if order.renter else None
+                    client_name = order.renter.name if order.renter else order.client_name
                     transactions.append({
                         "order_id": order.id,
                         "transaction_type": "sinal",
