@@ -1584,6 +1584,14 @@ class ServiceOrderReturnToPendingAPIView(APIView):
 
             # Retornar para pendente
             service_order.service_order_phase = pendente_phase
+
+            # Limpar campos de recusa/cancelamento
+            service_order.data_recusa = None
+            service_order.justification_refusal = None
+            service_order.justification_reason = None
+            service_order.date_canceled = None
+            service_order.canceled_by = None
+
             # Opcional: limpar datas de produção ou retirada se necessário
             # service_order.production_date = None
             # service_order.data_retirado = None
