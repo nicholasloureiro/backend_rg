@@ -3710,11 +3710,7 @@ class VirtualServiceOrderCreateAPIView(APIView):
             if data.get("sinal"):
                 sinal = data["sinal"]
                 sinal_amount = Decimal(str(sinal["amount"]))
-                sinal_data = sinal.get("data") or timezone.now()
-                if isinstance(sinal_data, str):
-                    sinal_data_str = sinal_data
-                else:
-                    sinal_data_str = sinal_data.isoformat()
+                sinal_data_str = timezone.now().isoformat()
 
                 payment_details.append({
                     "amount": float(sinal_amount),
@@ -3729,11 +3725,7 @@ class VirtualServiceOrderCreateAPIView(APIView):
             if data.get("restante"):
                 restante = data["restante"]
                 restante_amount = Decimal(str(restante["amount"]))
-                restante_data = restante.get("data") or timezone.now()
-                if isinstance(restante_data, str):
-                    restante_data_str = restante_data
-                else:
-                    restante_data_str = restante_data.isoformat()
+                restante_data_str = timezone.now().isoformat()
 
                 payment_details.append({
                     "amount": float(restante_amount),
@@ -3748,11 +3740,7 @@ class VirtualServiceOrderCreateAPIView(APIView):
             if data.get("indenizacao"):
                 indenizacao = data["indenizacao"]
                 indenizacao_amount = Decimal(str(indenizacao["amount"]))
-                indenizacao_data = indenizacao.get("data") or timezone.now()
-                if isinstance(indenizacao_data, str):
-                    indenizacao_data_str = indenizacao_data
-                else:
-                    indenizacao_data_str = indenizacao_data.isoformat()
+                indenizacao_data_str = timezone.now().isoformat()
 
                 payment_details.append({
                     "amount": float(indenizacao_amount),
