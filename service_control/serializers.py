@@ -484,17 +484,28 @@ class FrontendPaymentSerializer(serializers.Serializer):
     )
 
 
+class NullableDateField(serializers.DateField):
+    """DateField that treats empty strings as None"""
+
+    def to_internal_value(self, data):
+        if data == "" or data is None:
+            return None
+        return super().to_internal_value(data)
+
+
 class FrontendOrderServiceSerializer(serializers.Serializer):
     """Serializer para dados da ordem de serviço do payload do frontend"""
 
     data_pedido = serializers.DateField(required=False, help_text="Data do pedido")
-    data_evento = serializers.DateField(required=False, help_text="Data do evento")
+    data_evento = NullableDateField(
+        required=False, allow_null=True, help_text="Data do evento"
+    )
     data_retirada = serializers.DateField(required=False, help_text="Data de retirada")
-    data_prova = serializers.DateField(
+    data_prova = NullableDateField(
         required=False, allow_null=True, help_text="Data da prova"
     )
-    data_devolucao = serializers.DateField(
-        required=False, help_text="Data de devolução"
+    data_devolucao = NullableDateField(
+        required=False, allow_null=True, help_text="Data de devolução"
     )
     ocasiao = serializers.CharField(
         required=False, allow_blank=True, help_text="Papel do cliente no evento (NOIVO, PADRINHO, etc.) - Atualiza renter_role"
