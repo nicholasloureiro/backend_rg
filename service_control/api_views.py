@@ -1859,25 +1859,30 @@ class ServiceOrderDashboardAPIView(APIView):
             if order.total_value:
                 total_vendido += order.total_value
         
-        # Total Recebido (sinal + restante para OS finalizadas)
+        # Total Recebido - sum ALL payments by their actual payment date
         total_recebido = Decimal("0.00")
-        for order in qs_fechados:
-            if order.advance_payment:
-                total_recebido += order.advance_payment
-            # Só soma remaining_payment se a OS estiver finalizada
-            if order.service_order_phase and order.service_order_phase.name == "FINALIZADO":
-                if order.remaining_payment:
-                    total_recebido += order.remaining_payment
+        data_inicio_str = str(filters["data_inicio"])
+        data_fim_str = str(filters["data_fim"])
 
-        # Include virtual payments in total_recebido
-        virtual_orders = ServiceOrder.objects.filter(
-            order_date__gte=filters["data_inicio"],
-            order_date__lte=filters["data_fim"],
-            is_virtual=True,
-        )
+        # Get all confirmed orders with payment_details and sum by actual payment date
+        all_orders_with_payments = qs_fechados.exclude(payment_details__isnull=True)
+        for order in all_orders_with_payments:
+            if order.payment_details and isinstance(order.payment_details, list):
+                for pag in order.payment_details:
+                    pag_data = pag.get("data", "")
+                    pag_date = pag_data[:10] if pag_data else None
+                    if pag_date and data_inicio_str <= pag_date <= data_fim_str:
+                        total_recebido += Decimal(str(pag.get("amount", 0)))
+
+        # Include virtual payments by their actual payment date
+        virtual_orders = ServiceOrder.objects.filter(is_virtual=True).exclude(payment_details__isnull=True)
         for order in virtual_orders:
-            if order.advance_payment:
-                total_recebido += order.advance_payment
+            if order.payment_details and isinstance(order.payment_details, list):
+                for pag in order.payment_details:
+                    pag_data = pag.get("data", "")
+                    pag_date = pag_data[:10] if pag_data else None
+                    if pag_date and data_inicio_str <= pag_date <= data_fim_str:
+                        total_recebido += Decimal(str(pag.get("amount", 0)))
 
         # Taxa de conversão
         taxa_conversao = round(
