@@ -2281,8 +2281,6 @@ class ServiceOrderDashboardAPIView(APIView):
 
     def _calculate_financial_metrics(self, today, week_start, month_start):
         """Calcula métricas financeiras - dia, semana, mês"""
-        finished_phase = ServiceOrderPhase.objects.filter(name="FINALIZADO").first()
-
         # Fases consideradas como confirmadas (OS fechadas)
         confirmed_phases = [
             "EM_PRODUCAO",
@@ -2297,6 +2295,10 @@ class ServiceOrderDashboardAPIView(APIView):
             "mes": {"total_pedidos": 0.00, "total_recebido": 0.00, "numero_pedidos": 0},
         }
 
+        today_str = str(today)
+        week_start_str = str(week_start)
+        month_start_str = str(month_start)
+
         # Dia - apenas OS confirmadas
         today_orders = ServiceOrder.objects.filter(
             order_date=today,
@@ -2308,8 +2310,7 @@ class ServiceOrderDashboardAPIView(APIView):
                 resultados["dia"]["numero_pedidos"] += 1
             if order.advance_payment:
                 resultados["dia"]["total_recebido"] += float(order.advance_payment)
-            if order.service_order_phase == finished_phase and order.remaining_payment:
-                resultados["dia"]["total_recebido"] += float(order.remaining_payment)
+            # Note: remaining_payment is now summed separately by actual payment date
 
         # Dia - add virtual payments
         virtual_today = ServiceOrder.objects.filter(order_date=today, is_virtual=True)
@@ -2329,8 +2330,7 @@ class ServiceOrderDashboardAPIView(APIView):
                 resultados["semana"]["numero_pedidos"] += 1
             if order.advance_payment:
                 resultados["semana"]["total_recebido"] += float(order.advance_payment)
-            if order.service_order_phase == finished_phase and order.remaining_payment:
-                resultados["semana"]["total_recebido"] += float(order.remaining_payment)
+            # Note: remaining_payment is now summed separately by actual payment date
 
         # Semana - add virtual payments
         virtual_week = ServiceOrder.objects.filter(
@@ -2352,8 +2352,7 @@ class ServiceOrderDashboardAPIView(APIView):
                 resultados["mes"]["numero_pedidos"] += 1
             if order.advance_payment:
                 resultados["mes"]["total_recebido"] += float(order.advance_payment)
-            if order.service_order_phase == finished_phase and order.remaining_payment:
-                resultados["mes"]["total_recebido"] += float(order.remaining_payment)
+            # Note: remaining_payment is now summed separately by actual payment date
 
         # Mês - add virtual payments
         virtual_month = ServiceOrder.objects.filter(
@@ -2362,6 +2361,28 @@ class ServiceOrderDashboardAPIView(APIView):
         for order in virtual_month:
             if order.advance_payment:
                 resultados["mes"]["total_recebido"] += float(order.advance_payment)
+
+        # Sum remaining payments by their actual payment date (from payment_details)
+        # Query all finalized orders that have payment_details
+        all_finalized = ServiceOrder.objects.filter(
+            service_order_phase__name="FINALIZADO"
+        ).exclude(payment_details__isnull=True)
+
+        for order in all_finalized:
+            if order.payment_details and isinstance(order.payment_details, list):
+                for pag in order.payment_details:
+                    if pag.get("tipo") == "restante":
+                        pag_data = pag.get("data", "")
+                        pag_date = pag_data[:10] if pag_data else None
+                        if pag_date:
+                            amt = float(pag.get("amount", 0))
+                            # Check each period
+                            if pag_date == today_str:
+                                resultados["dia"]["total_recebido"] += amt
+                            if week_start_str <= pag_date <= today_str:
+                                resultados["semana"]["total_recebido"] += amt
+                            if month_start_str <= pag_date <= today_str:
+                                resultados["mes"]["total_recebido"] += amt
 
         return resultados
 
@@ -3918,12 +3939,9 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
         if page_size <= 0:
             page_size = 50
 
-        orders = ServiceOrder.objects.select_related("service_order_phase")
+        orders = ServiceOrder.objects.select_related("service_order_phase", "renter")
 
-        if start_date:
-            orders = orders.filter(order_date__gte=start_date)
-        if end_date:
-            orders = orders.filter(order_date__lte=end_date)
+        # Don't filter by order_date here - we'll filter individual transactions by payment date
 
         transactions = []
         total_amount = Decimal("0")
@@ -3975,6 +3993,13 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                                 pag_date = str(pag_data)[:10]
                         else:
                             pag_date = str(order.order_date)
+
+                        # Filter by actual payment date
+                        if start_date and pag_date and pag_date < start_date:
+                            continue
+                        if end_date and pag_date and pag_date > end_date:
+                            continue
+
                         if amt > 0:
                             transactions.append({
                                 "order_id": order.id,
@@ -3989,22 +4014,32 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                             })
                             total_amount += amt
                 else:
-                    amt = Decimal(str(float(adv)))
-                    pm = order.payment_method or "NÃO INFORMADO"
-                    client_name = order.renter.name if order.renter else order.client_name
-                    transactions.append({
-                        "order_id": order.id,
-                        "transaction_type": "sinal",
-                        "amount": amt,
-                        "payment_method": pm,
-                        "date": order.order_date,
-                        "time": None,
-                        "is_virtual": order.is_virtual,
-                        "client_name": client_name,
-                        "description": order.observations,
-                    })
-                    total_amount += amt
+                    # Fallback: use order_date as the payment date
+                    fallback_date = str(order.order_date)
+                    # Filter by date
+                    if start_date and fallback_date < start_date:
+                        pass  # skip this transaction
+                    elif end_date and fallback_date > end_date:
+                        pass  # skip this transaction
+                    else:
+                        amt = Decimal(str(float(adv)))
+                        pm = order.payment_method or "NÃO INFORMADO"
+                        client_name = order.renter.name if order.renter else order.client_name
+                        transactions.append({
+                            "order_id": order.id,
+                            "transaction_type": "sinal",
+                            "amount": amt,
+                            "payment_method": pm,
+                            "date": order.order_date,
+                            "time": None,
+                            "is_virtual": order.is_virtual,
+                            "client_name": client_name,
+                            "description": order.observations,
+                        })
+                        total_amount += amt
 
+            # Fallback for legacy orders: remaining_payment without payment_details entry
+            # Check if order is FINALIZADO and has remaining_payment not in payment_details
             if (
                 order.service_order_phase
                 and order.service_order_phase.name == "FINALIZADO"
@@ -4019,23 +4054,39 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                     rem = 0
 
                 if rem and float(rem) > 0:
-                    amt = Decimal(str(float(rem)))
-                    pm = order.payment_method or "NÃO INFORMADO"
-                    client_name = order.renter.name if order.renter else None
-                    transactions.append(
-                        {
-                            "order_id": order.id,
-                            "transaction_type": "restante",
-                            "amount": amt,
-                            "payment_method": pm,
-                            "date": order.data_devolvido or order.order_date,
-                            "time": None,
-                            "is_virtual": order.is_virtual,
-                            "client_name": client_name,
-                            "description": order.observations,
-                        }
-                    )
-                    total_amount += amt
+                    # Check if remaining payment is already in payment_details
+                    has_restante_in_details = False
+                    if order.payment_details and isinstance(order.payment_details, list):
+                        has_restante_in_details = any(
+                            pag.get("tipo") == "restante" for pag in order.payment_details
+                        )
+
+                    if not has_restante_in_details:
+                        # Use data_devolvido or order_date as fallback
+                        rem_date = str(order.data_devolvido or order.order_date)
+                        # Filter by date
+                        if start_date and rem_date < start_date:
+                            pass  # skip
+                        elif end_date and rem_date > end_date:
+                            pass  # skip
+                        else:
+                            amt = Decimal(str(float(rem)))
+                            pm = order.payment_method or "NÃO INFORMADO"
+                            client_name = order.renter.name if order.renter else None
+                            transactions.append(
+                                {
+                                    "order_id": order.id,
+                                    "transaction_type": "restante",
+                                    "amount": amt,
+                                    "payment_method": pm,
+                                    "date": order.data_devolvido or order.order_date,
+                                    "time": None,
+                                    "is_virtual": order.is_virtual,
+                                    "client_name": client_name,
+                                    "description": order.observations,
+                                }
+                            )
+                            total_amount += amt
 
         # build totals_by_method (sobre TODAS as transações, não paginado)
         totals_by_method = {}
