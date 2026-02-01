@@ -1864,8 +1864,12 @@ class ServiceOrderDashboardAPIView(APIView):
         data_inicio_str = str(filters["data_inicio"])
         data_fim_str = str(filters["data_fim"])
 
-        # Get all confirmed orders with payment_details and sum by actual payment date
-        all_orders_with_payments = qs_fechados.exclude(payment_details__isnull=True)
+        # Get ALL confirmed orders with payment_details (not filtered by order_date)
+        # and sum payments by their actual payment date
+        all_orders_with_payments = ServiceOrder.objects.filter(
+            service_order_phase__name__in=fases_fechadas,
+            is_virtual=False,
+        ).exclude(payment_details__isnull=True)
         for order in all_orders_with_payments:
             if order.payment_details and isinstance(order.payment_details, list):
                 for pag in order.payment_details:
