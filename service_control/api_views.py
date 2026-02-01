@@ -341,12 +341,16 @@ class ServiceOrderUpdateAPIView(APIView):
                     modalidade = os_data["modalidade"]
                     if modalidade == "Compra":
                         service_order.purchase = True
+                        service_order.devolucao_date = None  # Sales don't need return date
+                        service_order.event = None  # Sales don't need event
                     elif modalidade == "Aluguel":
                         service_order.purchase = False
                     elif modalidade == "Aluguel + Venda":
                         service_order.purchase = False  # Mantém como aluguel
                     elif modalidade == "Venda":
                         service_order.purchase = True
+                        service_order.devolucao_date = None  # Sales don't need return date
+                        service_order.event = None  # Sales don't need event
 
                     # Salvar modalidade no campo específico
                     service_order.service_type = modalidade
