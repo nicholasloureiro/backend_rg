@@ -1014,6 +1014,38 @@ class ServiceOrderDetailAPIView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
 
+    def delete(self, request, order_id):
+        """Delete (soft) a service order - admin only"""
+        user_person = getattr(request.user, "person", None)
+        is_admin = user_person and user_person.person_type.type == "ADMINISTRADOR"
+
+        if not is_admin:
+            return Response(
+                {"error": "Apenas administradores podem excluir ordens de serviço."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        service_order = get_object_or_404(ServiceOrder, id=order_id)
+
+        if service_order.date_canceled is not None:
+            return Response(
+                {"error": "Esta ordem de serviço já foi excluída."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if service_order.is_virtual:
+            return Response(
+                {"error": "Use o endpoint /api/v1/service-orders/virtual/<id>/ para excluir lançamentos."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        service_order.cancel(request.user)
+
+        return Response(
+            {"success": True, "message": f"Ordem de serviço #{order_id} excluída com sucesso."},
+            status=status.HTTP_200_OK,
+        )
+
 
 @extend_schema(
     tags=["service-orders"],
@@ -3850,6 +3882,42 @@ class VirtualServiceOrderCreateAPIView(APIView):
                 {"error": f"Erro ao criar OS virtual: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class VirtualServiceOrderDeleteAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, order_id):
+        """Delete (soft) a virtual service order - admin only"""
+        user_person = getattr(request.user, "person", None)
+        is_admin = user_person and user_person.person_type.type == "ADMINISTRADOR"
+
+        if not is_admin:
+            return Response(
+                {"error": "Apenas administradores podem excluir lançamentos."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        service_order = get_object_or_404(ServiceOrder, id=order_id)
+
+        if not service_order.is_virtual:
+            return Response(
+                {"error": "Esta OS não é virtual. Use /api/v1/service-orders/<id>/ para excluir."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if service_order.date_canceled is not None:
+            return Response(
+                {"error": "Este lançamento já foi excluído."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        service_order.cancel(request.user)
+
+        return Response(
+            {"success": True, "message": f"Lançamento #{order_id} excluído com sucesso."},
+            status=status.HTTP_200_OK,
+        )
 
 
 @extend_schema(

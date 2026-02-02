@@ -31,6 +31,7 @@ from .api_views import (
     ServiceOrderReturnToPendingAPIView,
     ServiceOrderUpdateAPIView,
     VirtualServiceOrderCreateAPIView,
+    VirtualServiceOrderDeleteAPIView,
 )
 
 urlpatterns = [
@@ -96,6 +97,11 @@ urlpatterns = [
         "service-orders/virtual/",
         VirtualServiceOrderCreateAPIView.as_view(),
         name="api_virtual_service_order_create",
+    ),
+    path(
+        "service-orders/virtual/<int:order_id>/",
+        VirtualServiceOrderDeleteAPIView.as_view(),
+        name="api_virtual_service_order_delete",
     ),
     path(
         "service-orders/<int:order_id>/",
