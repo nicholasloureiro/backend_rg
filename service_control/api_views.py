@@ -1015,7 +1015,7 @@ class ServiceOrderDetailAPIView(APIView):
             )
 
     def delete(self, request, order_id):
-        """Delete (soft) a service order - admin only"""
+        """Delete a service order - admin only"""
         user_person = getattr(request.user, "person", None)
         is_admin = user_person and user_person.person_type.type == "ADMINISTRADOR"
 
@@ -1027,19 +1027,13 @@ class ServiceOrderDetailAPIView(APIView):
 
         service_order = get_object_or_404(ServiceOrder, id=order_id)
 
-        if service_order.date_canceled is not None:
-            return Response(
-                {"error": "Esta ordem de serviço já foi excluída."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
         if service_order.is_virtual:
             return Response(
                 {"error": "Use o endpoint /api/v1/service-orders/virtual/<id>/ para excluir lançamentos."},
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        service_order.cancel(request.user)
+        service_order.delete()
 
         return Response(
             {"success": True, "message": f"Ordem de serviço #{order_id} excluída com sucesso."},
@@ -3888,7 +3882,7 @@ class VirtualServiceOrderDeleteAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     def delete(self, request, order_id):
-        """Delete (soft) a virtual service order - admin only"""
+        """Delete a virtual service order - admin only"""
         user_person = getattr(request.user, "person", None)
         is_admin = user_person and user_person.person_type.type == "ADMINISTRADOR"
 
@@ -3906,13 +3900,7 @@ class VirtualServiceOrderDeleteAPIView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        if service_order.date_canceled is not None:
-            return Response(
-                {"error": "Este lançamento já foi excluído."},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        service_order.cancel(request.user)
+        service_order.delete()
 
         return Response(
             {"success": True, "message": f"Lançamento #{order_id} excluído com sucesso."},
