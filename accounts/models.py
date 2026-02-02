@@ -74,6 +74,7 @@ class Person(BaseModel):
     name = models.CharField(max_length=255)
     cpf = models.CharField(max_length=20, unique=True, null=True, blank=True)
     person_type = models.ForeignKey(PersonType, on_delete=models.CASCADE)
+    is_infant = models.BooleanField(default=False)
 
     class Meta:
         db_table = "person"

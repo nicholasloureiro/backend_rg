@@ -202,7 +202,10 @@ class ServiceOrderClientSerializer(serializers.Serializer):
     order_id = serializers.IntegerField(help_text="ID da ordem de serviço")
     id = serializers.IntegerField(help_text="ID do cliente")
     nome = serializers.CharField(help_text="Nome do cliente")
-    cpf = serializers.CharField(help_text="CPF do cliente")
+    cpf = serializers.CharField(help_text="CPF do cliente", allow_null=True, allow_blank=True)
+    is_infant = serializers.BooleanField(
+        help_text="Se True, cliente é infantil e CPF é um placeholder INFANT-xxx"
+    )
     telefones = serializers.ListField(
         child=serializers.CharField(), help_text="Lista de telefones"
     )
@@ -561,12 +564,23 @@ class FrontendAddressSerializer(serializers.Serializer):
 
 class FrontendClientSerializer(serializers.Serializer):
     """Serializer para dados do cliente do payload do frontend.
-    
-    CPF é obrigatório no update da OS (diferente da triagem onde é opcional).
+
+    CPF é obrigatório no update da OS (diferente da triagem onde é opcional),
+    exceto quando is_infant=True (cliente infantil sem CPF).
     """
 
     nome = serializers.CharField(required=False, help_text="Nome do cliente", allow_blank=True)
-    cpf = serializers.CharField(required=True, help_text="CPF do cliente (obrigatório no update da OS)")
+    cpf = serializers.CharField(
+        required=False,
+        allow_blank=True,
+        allow_null=True,
+        help_text="CPF do cliente (obrigatório no update da OS, exceto quando is_infant=True)"
+    )
+    is_infant = serializers.BooleanField(
+        required=False,
+        default=False,
+        help_text="Se True, cliente é infantil e CPF não é obrigatório. Um placeholder INFANT-xxx será gerado."
+    )
     email = serializers.EmailField(
         help_text="Email do cliente", required=False, allow_blank=True, allow_null=True
     )

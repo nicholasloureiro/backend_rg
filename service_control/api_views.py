@@ -3,6 +3,7 @@ Views API para o app service_control
 """
 
 import logging
+import uuid
 from datetime import date, timedelta
 from decimal import Decimal
 
@@ -408,23 +409,40 @@ class ServiceOrderUpdateAPIView(APIView):
             # Processar dados do cliente
             if "cliente" in data:
                 cliente_data = data["cliente"]
-                
-                # CPF é obrigatório no update da OS
+
+                # Verificar flag is_infant
+                is_infant = cliente_data.get("is_infant", False)
+                current_renter = service_order.renter
+
+                # Se cliente atual já é infant, ou se is_infant=True no request, CPF não é obrigatório
+                client_is_infant = is_infant or (current_renter and current_renter.is_infant)
+
+                # CPF é obrigatório no update da OS, exceto para clientes infant
                 cpf_raw = cliente_data.get("cpf", "") or ""
                 cpf_limpo = cpf_raw.replace(".", "").replace("-", "").strip()
-                
-                if not cpf_limpo or len(cpf_limpo) != 11:
+
+                if not client_is_infant and (not cpf_limpo or len(cpf_limpo) != 11):
                     return Response(
                         {"error": "CPF do cliente é obrigatório no update da OS e deve conter 11 dígitos."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
-                
-                current_renter = service_order.renter
+
+                # Se marcando como infant agora, gerar UUID placeholder
+                if is_infant and not (current_renter and current_renter.is_infant):
+                    cpf_limpo = f"CRIANCA-{uuid.uuid4().hex[:12].upper()}"
+
+                # Se forneceu CPF real para um cliente infant, permite atualizar para não-infant
+                if cpf_limpo and len(cpf_limpo) == 11 and current_renter and current_renter.is_infant:
+                    # Convertendo de infant para cliente normal com CPF real
+                    is_infant = False
+
                 pessoa_temporaria = current_renter and not current_renter.cpf
-                
-                # Verificar se o CPF informado já existe em outra pessoa
-                existing_person_with_cpf = Person.objects.filter(cpf=cpf_limpo).first()
-                
+
+                # Verificar se o CPF informado já existe em outra pessoa (exceto CPF de infant)
+                existing_person_with_cpf = None
+                if cpf_limpo and not cpf_limpo.startswith("INFANT-"):
+                    existing_person_with_cpf = Person.objects.filter(cpf=cpf_limpo).first()
+
                 if pessoa_temporaria:
                     # Cliente atual foi criado na triagem sem CPF
                     if existing_person_with_cpf:
@@ -475,24 +493,38 @@ class ServiceOrderUpdateAPIView(APIView):
                     else:
                         # CPF não existe - atualizar pessoa temporária com o CPF
                         current_renter.cpf = cpf_limpo
+                        current_renter.is_infant = is_infant
                         if cliente_data.get("nome"):
                             current_renter.name = cliente_data["nome"].upper()
                         current_renter.save()
                         person = current_renter
                 else:
-                    # Fluxo normal: cliente já tem CPF
+                    # Fluxo normal: cliente já tem CPF ou é infant
                     if existing_person_with_cpf:
                         # Atualizar nome se mudou
                         if cliente_data.get("nome") and existing_person_with_cpf.name != cliente_data["nome"].upper():
                             existing_person_with_cpf.name = cliente_data["nome"].upper()
-                            existing_person_with_cpf.save()
+                        # Atualizar is_infant se mudou
+                        existing_person_with_cpf.is_infant = is_infant
+                        existing_person_with_cpf.save()
                         person = existing_person_with_cpf
+                    elif current_renter and current_renter.is_infant:
+                        # Cliente infant existente - atualizar dados
+                        if cliente_data.get("nome"):
+                            current_renter.name = cliente_data["nome"].upper()
+                        if cpf_limpo and len(cpf_limpo) == 11:
+                            # CPF real fornecido - converter de infant para normal
+                            current_renter.cpf = cpf_limpo
+                            current_renter.is_infant = False
+                        current_renter.save()
+                        person = current_renter
                     else:
                         # Criar nova pessoa com o CPF
                         person = Person.objects.create(
                             cpf=cpf_limpo,
                             name=cliente_data.get("nome", "").upper(),
                             person_type=PersonType.objects.get_or_create(type="CLIENTE")[0],
+                            is_infant=is_infant,
                             created_by=request.user,
                         )
                     service_order.renter = person
@@ -4572,19 +4604,30 @@ class ServiceOrderPreTriageAPIView(APIView):
             data = request.data
             cpf_raw = data.get("cpf", "") or ""
             cpf = cpf_raw.replace(".", "").replace("-", "").strip()
-            
+            is_infant = data.get("is_infant", False)
+
             # CPF é opcional na triagem - se fornecido, deve ser válido
-            if cpf and len(cpf) != 11:
+            # Se is_infant=True, CPF não é necessário (será gerado automaticamente)
+            if cpf and len(cpf) != 11 and not is_infant:
                 return Response(
                     {"error": "CPF inválido. Deve conter 11 dígitos ou ser deixado em branco."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
             pt, _ = PersonType.objects.get_or_create(type="CLIENTE")
-            
+
+            # Se is_infant=True, gerar UUID placeholder para CPF
+            if is_infant:
+                cpf = f"CRIANCA-{uuid.uuid4().hex[:12].upper()}"
+                person = Person.objects.create(
+                    name=data.get("cliente_nome", "").upper(),
+                    cpf=cpf,
+                    person_type=pt,
+                    is_infant=True,
+                    created_by=request.user,
+                )
             # Se CPF foi fornecido, buscar ou criar pessoa por CPF
-            # Se não, criar nova pessoa sem CPF (temporária até update da OS)
-            if cpf:
+            elif cpf:
                 person, _ = Person.objects.get_or_create(
                     cpf=cpf,
                     defaults={

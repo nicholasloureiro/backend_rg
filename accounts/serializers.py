@@ -202,7 +202,10 @@ class ClientSerializer(serializers.Serializer):
 
     id = serializers.IntegerField()
     name = serializers.CharField()
-    cpf = serializers.CharField()
+    cpf = serializers.CharField(allow_null=True, allow_blank=True)
+    is_infant = serializers.BooleanField(
+        help_text="Se True, cliente é infantil e CPF é um placeholder INFANT-xxx"
+    )
     email = serializers.CharField()
     phone = serializers.CharField()
     address = serializers.DictField(required=False, allow_null=True)
