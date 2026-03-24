@@ -18,6 +18,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenRefreshView
 
 from .models import City, Person, PersonsAdresses, PersonsContacts, PersonType
+from .utils import validate_cpf
 from .serializers import (
     ClientListSerializer,
     ClientRegisterSerializer,
@@ -834,9 +835,10 @@ class ClientRegisterAPIView(APIView):
             telefone = validated_data.get("telefone")
 
             # Validar CPF
-            if len(cpf) != 11:
+            if not validate_cpf(cpf):
                 return Response(
-                    {"error": "CPF inválido"}, status=status.HTTP_400_BAD_REQUEST
+                    {"error": "CPF inválido. Verifique os dígitos."},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
             # Verificar se cliente já existe
@@ -1434,5 +1436,104 @@ class GetUserMeAPIView(APIView):
         except Exception as e:
             return Response(
                 {"error": f"Erro ao buscar dados do usuário: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ClientDeleteAPIView(APIView):
+    """Excluir cliente (admin only)"""
+
+    permission_classes = [IsAuthenticated]
+
+    def delete(self, request, person_id):
+        try:
+            user_person = getattr(request.user, "person", None)
+            is_admin = user_person and user_person.person_type.type == "ADMINISTRADOR"
+            if not is_admin:
+                return Response(
+                    {"error": "Apenas administradores podem excluir clientes."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            try:
+                person = Person.objects.get(id=person_id, person_type__type="CLIENTE")
+            except Person.DoesNotExist:
+                return Response(
+                    {"error": "Cliente não encontrado."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            person_name = person.name
+            person.contacts.all().delete()
+            person.personsadresses_set.all().delete()
+            person.delete()
+
+            return Response(
+                {
+                    "success": True,
+                    "message": f"Cliente '{person_name}' excluído com sucesso.",
+                }
+            )
+
+        except Exception as e:
+            return Response(
+                {"error": f"Erro ao excluir cliente: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ClientUpdateCPFAPIView(APIView):
+    """Editar CPF de cliente (admin only)"""
+
+    permission_classes = [IsAuthenticated]
+
+    def put(self, request, person_id):
+        try:
+            user_person = getattr(request.user, "person", None)
+            is_admin = user_person and user_person.person_type.type == "ADMINISTRADOR"
+            if not is_admin:
+                return Response(
+                    {"error": "Apenas administradores podem editar CPF."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            try:
+                person = Person.objects.get(id=person_id, person_type__type="CLIENTE")
+            except Person.DoesNotExist:
+                return Response(
+                    {"error": "Cliente não encontrado."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            new_cpf = (request.data.get("cpf", "") or "").replace(".", "").replace("-", "").strip()
+            if not validate_cpf(new_cpf):
+                return Response(
+                    {"error": "CPF inválido. Verifique os dígitos."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            # Verificar unicidade
+            existing = Person.objects.filter(cpf=new_cpf).exclude(id=person_id).first()
+            if existing:
+                return Response(
+                    {"error": f"CPF já está cadastrado para outro cliente: {existing.name}"},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            person.cpf = new_cpf
+            person.updated_by = request.user
+            person.save()
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "CPF atualizado com sucesso.",
+                    "cpf": new_cpf,
+                }
+            )
+
+        except Exception as e:
+            return Response(
+                {"error": f"Erro ao atualizar CPF: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )

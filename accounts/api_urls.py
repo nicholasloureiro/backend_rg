@@ -6,9 +6,11 @@ from django.urls import path
 
 from .api_views import (
     CitySearchAPIView,
+    ClientDeleteAPIView,
     ClientListAPIView,
     ClientRegisterAPIView,
     ClientSearchAPIView,
+    ClientUpdateCPFAPIView,
     EmployeeListAPIView,
     EmployeeRegisterAPIView,
     EmployeeToggleStatusAPIView,
@@ -62,4 +64,14 @@ urlpatterns = [
     ),
     path("clients/list/", ClientListAPIView.as_view(), name="api_client_list"),
     path("clients/search/", ClientSearchAPIView.as_view(), name="api_client_search"),
+    path(
+        "clients/<int:person_id>/delete/",
+        ClientDeleteAPIView.as_view(),
+        name="api_client_delete",
+    ),
+    path(
+        "clients/<int:person_id>/update-cpf/",
+        ClientUpdateCPFAPIView.as_view(),
+        name="api_client_update_cpf",
+    ),
 ]

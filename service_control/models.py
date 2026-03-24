@@ -28,17 +28,17 @@ class RefusalReason(BaseModel):
 
 class ServiceOrder(BaseModel):
     renter = models.ForeignKey(
-        Person, on_delete=models.CASCADE, related_name="service_orders", null=True, blank=True
+        Person, on_delete=models.SET_NULL, related_name="service_orders", null=True, blank=True
     )
     employee = models.ForeignKey(
         Person,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         related_name="employee_service_orders",
         null=True,
     )
     attendant = models.ForeignKey(
         Person,
-        on_delete=models.CASCADE,
+        on_delete=models.SET_NULL,
         related_name="attendant_service_orders",
         null=True,
     )
@@ -120,6 +120,34 @@ class ServiceOrder(BaseModel):
         null=True,
         blank=True,
         help_text="Nome do cliente (para OS virtual sem cliente cadastrado)",
+    )
+    data_resgate = models.DateField(
+        null=True,
+        blank=True,
+        help_text="Data em que a OS foi resgatada (retornada de RECUSADA)",
+    )
+    is_partnership = models.BooleanField(
+        default=False,
+        help_text="OS de parceria/voucher (permite valor zero)",
+    )
+    partnership_type = models.CharField(
+        max_length=50,
+        null=True,
+        blank=True,
+        choices=[
+            ("PARCERIA", "Parceria"),
+            ("VOUCHER", "Voucher"),
+            ("LINK", "Link"),
+        ],
+        help_text="Tipo de parceria",
+    )
+    partnership_authorized_by = models.ForeignKey(
+        Person,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="authorized_partnerships",
+        help_text="Administrador que autorizou a parceria",
     )
 
     class Meta:

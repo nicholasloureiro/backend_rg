@@ -3,6 +3,7 @@ from drf_spectacular.utils import OpenApiExample, extend_schema_serializer
 from rest_framework import serializers
 
 from .models import City, Person, PersonsAdresses, PersonsContacts, PersonType
+from .utils import validate_cpf
 
 
 class CitySerializer(serializers.ModelSerializer):
@@ -76,8 +77,8 @@ class EmployeeRegisterSerializer(serializers.Serializer):
 
     def validate_cpf(self, value):
         cpf = "".join(filter(str.isdigit, value))
-        if len(cpf) != 11:
-            raise serializers.ValidationError("CPF inválido.")
+        if not validate_cpf(cpf):
+            raise serializers.ValidationError("CPF inválido. Verifique os dígitos.")
         if User.objects.filter(username=cpf).exists():
             raise serializers.ValidationError("CPF já cadastrado como login.")
         if Person.objects.filter(cpf=cpf).exists():

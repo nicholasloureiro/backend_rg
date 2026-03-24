@@ -9,7 +9,7 @@ from decimal import Decimal
 
 logger = logging.getLogger(__name__)
 
-from django.db import models
+from django.db import models, transaction
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
@@ -21,6 +21,7 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from accounts.models import City, Person, PersonsAdresses, PersonsContacts, PersonType
+from accounts.utils import validate_cpf
 from products.models import TemporaryProduct
 
 from .models import (
@@ -155,9 +156,10 @@ class ServiceOrderCreateAPIView(APIView):
             }
 
             # Validações
-            if len(order_data["cpf"]) != 11:
+            if not validate_cpf(order_data["cpf"]):
                 return Response(
-                    {"error": "CPF Inválido"}, status=status.HTTP_400_BAD_REQUEST
+                    {"error": "CPF inválido. Verifique os dígitos."},
+                    status=status.HTTP_400_BAD_REQUEST,
                 )
 
             if not all(
@@ -323,6 +325,19 @@ class ServiceOrderUpdateAPIView(APIView):
             if "ordem_servico" in data:
                 os_data = data["ordem_servico"]
 
+                if "data_pedido" in os_data and os_data["data_pedido"]:
+                    new_order_date = os_data["data_pedido"]
+                    old_order_date = service_order.order_date
+                    if str(new_order_date) != str(old_order_date):
+                        service_order.order_date = new_order_date
+                        # Sincronizar data dos pagamentos sinal com a nova data
+                        if service_order.payment_details:
+                            for entry in service_order.payment_details:
+                                if entry.get("tipo") == "sinal":
+                                    old_data = entry.get("data", "")
+                                    # Preservar horário, atualizar data
+                                    time_part = old_data[10:] if len(old_data) > 10 else ""
+                                    entry["data"] = str(new_order_date) + time_part
                 if "data_retirada" in os_data:
                     service_order.retirada_date = os_data["data_retirada"]
                 if "data_devolucao" in os_data:
@@ -356,6 +371,21 @@ class ServiceOrderUpdateAPIView(APIView):
                     # Salvar modalidade no campo específico
                     service_order.service_type = modalidade
 
+                # Parceria / voucher / link
+                if "is_partnership" in os_data:
+                    service_order.is_partnership = os_data["is_partnership"]
+                if "partnership_type" in os_data:
+                    service_order.partnership_type = os_data["partnership_type"]
+                if service_order.is_partnership and os_data.get("partnership_authorized_by_id"):
+                    try:
+                        authorizer = Person.objects.get(
+                            id=os_data["partnership_authorized_by_id"],
+                            person_type__type="ADMINISTRADOR",
+                        )
+                        service_order.partnership_authorized_by = authorizer
+                    except Person.DoesNotExist:
+                        pass
+
                 # Atualizar atendente/recepcionista responsável
                 if "employee_id" in os_data and os_data["employee_id"]:
                     try:
@@ -382,7 +412,7 @@ class ServiceOrderUpdateAPIView(APIView):
                                 service_order.advance_payment = sinal_data["total"]
                             if "pagamentos" in sinal_data and sinal_data["pagamentos"]:
                                 formas = []
-                                payment_details = []
+                                new_sinal_entries = []
                                 data_sinal = timezone.now().isoformat()
                                 for pag in sinal_data["pagamentos"]:
                                     forma = pag.get("forma_pagamento")
@@ -390,7 +420,7 @@ class ServiceOrderUpdateAPIView(APIView):
                                     if forma:
                                         if forma not in formas:
                                             formas.append(forma)
-                                        payment_details.append({
+                                        new_sinal_entries.append({
                                             "amount": float(amount),
                                             "forma_pagamento": forma,
                                             "tipo": "sinal",
@@ -398,8 +428,11 @@ class ServiceOrderUpdateAPIView(APIView):
                                         })
                                 if formas:
                                     service_order.payment_method = ", ".join(formas)
-                                if payment_details:
-                                    service_order.payment_details = payment_details
+                                if new_sinal_entries:
+                                    # Preservar entradas que não são sinal (restante, parcial, estorno, indenizacao)
+                                    existing = service_order.payment_details or []
+                                    non_sinal = [e for e in existing if e.get("tipo") != "sinal"]
+                                    service_order.payment_details = non_sinal + new_sinal_entries
                         elif isinstance(sinal_data, (int, float, Decimal)):
                             service_order.advance_payment = Decimal(str(sinal_data))
 
@@ -421,9 +454,9 @@ class ServiceOrderUpdateAPIView(APIView):
                 cpf_raw = cliente_data.get("cpf", "") or ""
                 cpf_limpo = cpf_raw.replace(".", "").replace("-", "").strip()
 
-                if not client_is_infant and (not cpf_limpo or len(cpf_limpo) != 11):
+                if not client_is_infant and (not cpf_limpo or not validate_cpf(cpf_limpo)):
                     return Response(
-                        {"error": "CPF do cliente é obrigatório no update da OS e deve conter 11 dígitos."},
+                        {"error": "CPF inválido. Verifique os dígitos do CPF do cliente."},
                         status=status.HTTP_400_BAD_REQUEST,
                     )
 
@@ -446,50 +479,56 @@ class ServiceOrderUpdateAPIView(APIView):
                 if pessoa_temporaria:
                     # Cliente atual foi criado na triagem sem CPF
                     if existing_person_with_cpf:
-                        # CPF pertence a cliente já existente - transferir dados e vincular
-                        # Transferir contatos da pessoa temporária para a pessoa existente
-                        for contact in current_renter.contacts.all():
-                            # Verificar se já existe contato igual na pessoa destino
-                            existing = PersonsContacts.objects.filter(
-                                person=existing_person_with_cpf,
-                                email=contact.email,
-                                phone=contact.phone,
-                            ).exists()
-                            if not existing:
-                                contact.person = existing_person_with_cpf
-                                contact.save()
-                        
-                        # Transferir endereços da pessoa temporária para a pessoa existente
-                        for address in current_renter.personsadresses_set.all():
-                            # Verificar se já existe endereço igual na pessoa destino
-                            existing = PersonsAdresses.objects.filter(
-                                person=existing_person_with_cpf,
-                                street=address.street,
-                                number=address.number,
-                                cep=address.cep,
-                                neighborhood=address.neighborhood,
-                                complemento=address.complemento,
-                                city=address.city,
-                            ).exists()
-                            if not existing:
-                                address.person = existing_person_with_cpf
-                                address.save()
-                        
-                        # Atualizar nome se fornecido
-                        if cliente_data.get("nome"):
-                            existing_person_with_cpf.name = cliente_data["nome"].upper()
-                            existing_person_with_cpf.save()
-                        
-                        # Verificar se pessoa temporária não está vinculada a outras OS
-                        other_os_count = ServiceOrder.objects.filter(renter=current_renter).exclude(id=service_order.id).count()
-                        
-                        # Atualizar renter da OS para a pessoa existente
-                        person = existing_person_with_cpf
-                        service_order.renter = person
-                        
-                        # Se pessoa temporária não tem outras OS, pode ser removida
-                        if other_os_count == 0:
-                            current_renter.delete()
+                        with transaction.atomic():
+                            # CPF pertence a cliente já existente - transferir dados e vincular
+                            # Transferir contatos da pessoa temporária para a pessoa existente
+                            for contact in current_renter.contacts.all():
+                                # Verificar se já existe contato igual na pessoa destino
+                                existing = PersonsContacts.objects.filter(
+                                    person=existing_person_with_cpf,
+                                    email=contact.email,
+                                    phone=contact.phone,
+                                ).exists()
+                                if not existing:
+                                    contact.person = existing_person_with_cpf
+                                    contact.save()
+
+                            # Transferir endereços da pessoa temporária para a pessoa existente
+                            for address in current_renter.personsadresses_set.all():
+                                # Verificar se já existe endereço igual na pessoa destino
+                                existing = PersonsAdresses.objects.filter(
+                                    person=existing_person_with_cpf,
+                                    street=address.street,
+                                    number=address.number,
+                                    cep=address.cep,
+                                    neighborhood=address.neighborhood,
+                                    complemento=address.complemento,
+                                    city=address.city,
+                                ).exists()
+                                if not existing:
+                                    address.person = existing_person_with_cpf
+                                    address.save()
+
+                            # Atualizar nome se fornecido
+                            if cliente_data.get("nome"):
+                                existing_person_with_cpf.name = cliente_data["nome"].upper()
+                                existing_person_with_cpf.save()
+
+                            # Atualizar renter da OS para a pessoa existente
+                            person = existing_person_with_cpf
+                            service_order.renter = person
+
+                            # Verificar se pessoa temporária não está vinculada a outras OS (com lock)
+                            other_os_count = (
+                                ServiceOrder.objects.select_for_update()
+                                .filter(renter=current_renter)
+                                .exclude(id=service_order.id)
+                                .count()
+                            )
+
+                            # Se pessoa temporária não tem outras OS, pode ser removida
+                            if other_os_count == 0:
+                                current_renter.delete()
                     else:
                         # CPF não existe - atualizar pessoa temporária com o CPF
                         current_renter.cpf = cpf_limpo
@@ -677,16 +716,17 @@ class ServiceOrderUpdateAPIView(APIView):
 
             service_order.save()
 
-            # Mover para EM_PRODUCAO apenas se for atualização COMPLETA
-            # Considera completa se tem itens ou acessórios (não é apenas employee_id ou datas)
+            # Mover para EM_PRODUCAO apenas se for atualização COMPLETA e NÃO for rascunho
+            # ?draft=true permite salvar sem mudar fase
+            is_draft = request.query_params.get("draft", "").lower() == "true"
+
             is_full_update = False
             if "ordem_servico" in data:
                 os_data = data["ordem_servico"]
-                # Verifica se tem itens ou acessórios (atualização completa)
                 if "itens" in os_data or "acessorios" in os_data:
                     is_full_update = True
 
-            if is_full_update:
+            if is_full_update and not is_draft:
                 # Atualização completa - mover para EM_PRODUCAO
                 em_producao_phase = ServiceOrderPhase.objects.filter(
                     name="EM_PRODUCAO"
@@ -1020,7 +1060,16 @@ class ServiceOrderDetailAPIView(APIView):
                 ),
                 "data_retirada": order.retirada_date,
                 "data_devolucao": order.devolucao_date,
+                "data_prova": order.prova_date,
                 "modalidade": order.service_type or "Aluguel",
+                "ocasiao": order.renter_role or "",
+                "origem": order.came_from or "",
+                "event_id": order.event.id if order.event else None,
+                "event_name": order.event.name if order.event else None,
+                "employee_id": order.employee.id if order.employee else None,
+                "employee_name": order.employee.name if order.employee else "",
+                "is_partnership": order.is_partnership,
+                "partnership_type": order.partnership_type or "",
                 "itens": itens,
                 "acessorios": acessorios,
                 "pagamento": {
@@ -1032,8 +1081,12 @@ class ServiceOrderDetailAPIView(APIView):
                         float(order.remaining_payment) if order.remaining_payment else 0
                     ),
                     "forma_pagamento": order.payment_method or "",
+                    "payment_details": order.payment_details or [],
                 },
             }
+
+            # Adicionar is_infant ao dados do cliente
+            client_data["is_infant"] = order.renter.is_infant if order.renter else False
 
             # Adicionar dados completos ao response
             order_data.update({"ordem_servico": ordem_servico_data})
@@ -1450,8 +1503,28 @@ class ServiceOrderMarkRetrievedAPIView(APIView):
                 else:
                     service_order.payment_method = formas_str
 
-            service_order.service_order_phase = aguardando_devolucao_phase
             service_order.data_retirado = timezone.now()
+
+            # Vendas não precisam de devolução — ir direto para FINALIZADO
+            is_sale = service_order.service_type in ["Compra", "Venda"]
+            all_items_sold = False
+            if service_order.service_type == "Aluguel + Venda":
+                items = service_order.items.select_related("temporary_product").all()
+                all_items_sold = items.exists() and all(
+                    item.temporary_product and item.temporary_product.venda
+                    for item in items
+                )
+
+            if is_sale or all_items_sold:
+                finalizado_phase, _ = ServiceOrderPhase.objects.get_or_create(
+                    name="FINALIZADO", defaults={"created_by": request.user}
+                )
+                service_order.service_order_phase = finalizado_phase
+                service_order.data_finalizado = date.today()
+                service_order.data_devolvido = timezone.now()
+            else:
+                service_order.service_order_phase = aguardando_devolucao_phase
+
             service_order.save()
 
             return Response(
@@ -1644,6 +1717,9 @@ class ServiceOrderReturnToPendingAPIView(APIView):
                     status=status.HTTP_403_FORBIDDEN,
                 )
 
+            # Registrar resgate se estava RECUSADA
+            was_recusada = service_order.service_order_phase.name == "RECUSADA"
+
             # Retornar para pendente
             service_order.service_order_phase = pendente_phase
 
@@ -1654,9 +1730,9 @@ class ServiceOrderReturnToPendingAPIView(APIView):
             service_order.date_canceled = None
             service_order.canceled_by = None
 
-            # Opcional: limpar datas de produção ou retirada se necessário
-            # service_order.production_date = None
-            # service_order.data_retirado = None
+            if was_recusada:
+                service_order.data_resgate = date.today()
+
             service_order.save()
 
             return Response(
@@ -1791,6 +1867,9 @@ class ServiceOrderDashboardAPIView(APIView):
             status_metrics = self._calculate_status_metrics(today, in_10_days)
             resultados = self._calculate_financial_metrics(today, week_start, month_start)
 
+            # ========== OS DO DIA (todas as OS de hoje por fase) ==========
+            os_do_dia = self._calculate_os_do_dia(today)
+
             return Response(
                 {
                     "status": 200,
@@ -1811,6 +1890,8 @@ class ServiceOrderDashboardAPIView(APIView):
                         # Métricas legadas (agenda e resultados financeiros)
                         "status": status_metrics,
                         "resultados": resultados,
+                        # OS do dia
+                        "os_do_dia": os_do_dia,
                     },
                 }
             )
@@ -2350,6 +2431,39 @@ class ServiceOrderDashboardAPIView(APIView):
 
         return status
 
+    def _calculate_os_do_dia(self, today):
+        """Retorna resumo das OS do dia agrupadas por fase"""
+        today_orders = (
+            ServiceOrder.objects.filter(order_date=today, is_virtual=False)
+            .select_related("renter", "employee", "service_order_phase")
+        )
+
+        phases_map = {}
+        for order in today_orders:
+            phase_name = order.service_order_phase.name if order.service_order_phase else "SEM_FASE"
+            if phase_name not in phases_map:
+                phases_map[phase_name] = []
+            phases_map[phase_name].append({
+                "id": order.id,
+                "client_name": order.renter.name if order.renter else order.client_name or "",
+                "total_value": float(order.total_value) if order.total_value else 0,
+                "employee_name": order.employee.name if order.employee else "",
+            })
+
+        result = {
+            "pendentes": phases_map.get("PENDENTE", []),
+            "em_producao": phases_map.get("EM_PRODUCAO", []),
+            "recusadas": phases_map.get("RECUSADA", []),
+            "aguardando_retirada": phases_map.get("AGUARDANDO_RETIRADA", []),
+            "aguardando_devolucao": phases_map.get("AGUARDANDO_DEVOLUCAO", []),
+            "finalizadas": phases_map.get("FINALIZADO", []),
+            "total_pendentes": len(phases_map.get("PENDENTE", [])),
+            "total_em_producao": len(phases_map.get("EM_PRODUCAO", [])),
+            "total_recusadas": len(phases_map.get("RECUSADA", [])),
+            "total_do_dia": today_orders.count(),
+        }
+        return result
+
     def _calculate_financial_metrics(self, today, week_start, month_start):
         """Calcula métricas financeiras - dia, semana, mês"""
         # Fases consideradas como confirmadas (OS fechadas)
@@ -2657,17 +2771,15 @@ class ServiceOrderListByPhaseAPIView(APIView):
                     return
 
                 # Buscar OS que passaram da data do evento e não foram retiradas
+                # Apenas recusar PENDENTE e EM_PRODUCAO — ordens já retiradas ou finalizadas não devem ser auto-recusadas
                 overdue_orders = ServiceOrder.objects.filter(
                     event__event_date__lt=today,
-                    data_retirado__isnull=True,  # Não foi retirada
+                    data_retirado__isnull=True,
                     service_order_phase__name__in=[
                         "PENDENTE",
                         "EM_PRODUCAO",
-                        "AGUARDANDO_DEVOLUCAO",
-                        "FINALIZADO",
-                        "AGUARDANDO_RETIRADA",
                     ],
-                    event__isnull=False,  # Só OS com evento vinculado
+                    event__isnull=False,
                 ).exclude(service_order_phase__name="RECUSADA")
 
                 for order in overdue_orders:
@@ -2693,26 +2805,35 @@ class ServiceOrderListByPhaseAPIView(APIView):
             # Filtrar orders baseado na fase
             if phase.name == "ATRASADO":
                 # Fase ATRASADO: SOMENTE OS em AGUARDANDO_DEVOLUCAO que estão atrasadas na devolução
-                # OS atrasadas em retirada ficam em AGUARDANDO_RETIRADA com flag esta_atrasada=True
+                # OS atrasadas: inclui devolução atrasada, evento passado, e retirada atrasada
                 aguardando_devolucao_phase = ServiceOrderPhase.objects.filter(
                     name="AGUARDANDO_DEVOLUCAO"
                 ).first()
+                aguardando_retirada_phase = ServiceOrderPhase.objects.filter(
+                    name="AGUARDANDO_RETIRADA"
+                ).first()
+
+                q_devolucao_atrasada = models.Q(
+                    service_order_phase=aguardando_devolucao_phase,
+                    devolucao_date__lt=today,
+                    data_devolvido__isnull=True,
+                )
+                q_evento_passado_devolucao = models.Q(
+                    service_order_phase=aguardando_devolucao_phase,
+                    data_devolvido__isnull=True,
+                    event__event_date__lt=today,
+                    event__isnull=False,
+                )
+                q_retirada_atrasada = models.Q(
+                    service_order_phase=aguardando_retirada_phase,
+                    esta_atrasada=True,
+                )
 
                 orders = (
                     base_qs.filter(
-                        models.Q(
-                            service_order_phase=aguardando_devolucao_phase,
-                            devolucao_date__lt=today,  # Passou da data de devolução
-                            event__event_date__gt=today,  # Evento ainda não passou
-                            event__isnull=False,  # Só OS com evento vinculado
-                        )
-                        | models.Q(
-                            service_order_phase=aguardando_devolucao_phase,
-                            data_devolvido__isnull=True,  # Não foi devolvida
-                            event__event_date__lt=today,  # Evento já passou
-                            event__isnull=False,  # Só OS com evento vinculado
-                        )
+                        q_devolucao_atrasada | q_evento_passado_devolucao | q_retirada_atrasada
                     )
+                    .distinct()
                     .select_related(
                         "renter",
                         "employee",
@@ -3278,9 +3399,6 @@ class ServiceOrderListByPhaseV2APIView(APIView):
                     service_order_phase__name__in=[
                         "PENDENTE",
                         "EM_PRODUCAO",
-                        "AGUARDANDO_DEVOLUCAO",
-                        "FINALIZADO",
-                        "AGUARDANDO_RETIRADA",
                     ],
                     event__isnull=False,
                 ).exclude(service_order_phase__name="RECUSADA")
@@ -3306,22 +3424,34 @@ class ServiceOrderListByPhaseV2APIView(APIView):
                 aguardando_devolucao_phase = ServiceOrderPhase.objects.filter(
                     name="AGUARDANDO_DEVOLUCAO"
                 ).first()
+                aguardando_retirada_phase = ServiceOrderPhase.objects.filter(
+                    name="AGUARDANDO_RETIRADA"
+                ).first()
+
+                # Ordens atrasadas na devolução (com ou sem evento)
+                q_devolucao_atrasada = models.Q(
+                    service_order_phase=aguardando_devolucao_phase,
+                    devolucao_date__lt=today,
+                    data_devolvido__isnull=True,
+                )
+                # Ordens aguardando devolução cujo evento já passou
+                q_evento_passado_devolucao = models.Q(
+                    service_order_phase=aguardando_devolucao_phase,
+                    data_devolvido__isnull=True,
+                    event__event_date__lt=today,
+                    event__isnull=False,
+                )
+                # Ordens atrasadas na retirada
+                q_retirada_atrasada = models.Q(
+                    service_order_phase=aguardando_retirada_phase,
+                    esta_atrasada=True,
+                )
 
                 orders_qs = (
                     base_qs.filter(
-                        models.Q(
-                            service_order_phase=aguardando_devolucao_phase,
-                            devolucao_date__lt=today,
-                            event__event_date__gt=today,
-                            event__isnull=False,
-                        )
-                        | models.Q(
-                            service_order_phase=aguardando_devolucao_phase,
-                            data_devolvido__isnull=True,
-                            event__event_date__lt=today,
-                            event__isnull=False,
-                        )
+                        q_devolucao_atrasada | q_evento_passado_devolucao | q_retirada_atrasada
                     )
+                    .distinct()
                     .select_related(
                         "renter",
                         "employee",
@@ -4088,11 +4218,13 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                         if end_date and pag_date and pag_date > end_date:
                             continue
 
-                        if amt > 0:
+                        if amt > 0 or tipo == "estorno":
+                            # Estornos são subtraídos do total
+                            effective_amt = -abs(amt) if tipo == "estorno" else amt
                             transactions.append({
                                 "order_id": order.id,
                                 "transaction_type": tipo,
-                                "amount": amt,
+                                "amount": effective_amt,
                                 "payment_method": pm,
                                 "date": pag_date,
                                 "time": pag_time,
@@ -4100,7 +4232,7 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                                 "client_name": client_name,
                                 "description": order.observations,
                             })
-                            total_amount += amt
+                            total_amount += effective_amt
                 else:
                     # Fallback: use order_date as the payment date
                     fallback_date = str(order.order_date)
@@ -4207,6 +4339,228 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
         }
 
         return Response(summary)
+
+
+class ServiceOrderRefundAPIView(APIView):
+    """Lançar estorno em uma ordem de serviço (admin only)"""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        try:
+            service_order = get_object_or_404(ServiceOrder, id=order_id)
+
+            user_person = getattr(request.user, "person", None)
+            is_admin = user_person and user_person.person_type.type == "ADMINISTRADOR"
+            if not is_admin:
+                return Response(
+                    {"error": "Apenas administradores podem lançar estornos."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            amount = request.data.get("amount")
+            forma_pagamento = request.data.get("forma_pagamento", "")
+            motivo = request.data.get("motivo", "")
+
+            if not amount or Decimal(str(amount)) <= 0:
+                return Response(
+                    {"error": "Valor do estorno deve ser maior que zero."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            refund_amount = Decimal(str(amount))
+
+            current_details = service_order.payment_details or []
+            current_details.append(
+                {
+                    "amount": float(refund_amount),
+                    "forma_pagamento": forma_pagamento,
+                    "tipo": "estorno",
+                    "data": timezone.now().isoformat(),
+                    "motivo": motivo,
+                }
+            )
+            service_order.payment_details = current_details
+            service_order.advance_payment = (
+                service_order.advance_payment or Decimal("0")
+            ) - refund_amount
+            service_order.save()
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "Estorno lançado com sucesso",
+                    "refund_amount": float(refund_amount),
+                    "new_advance_payment": float(service_order.advance_payment),
+                    "new_remaining_payment": float(service_order.remaining_payment),
+                }
+            )
+
+        except Exception as e:
+            return Response(
+                {"error": f"Erro ao lançar estorno: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ServiceOrderAddPaymentAPIView(APIView):
+    """Adicionar pagamento parcial sem mudar fase da OS"""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        try:
+            service_order = get_object_or_404(ServiceOrder, id=order_id)
+
+            payments = request.data.get("payments", [])
+            if not payments:
+                return Response(
+                    {"error": "Lista de pagamentos é obrigatória."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            current_details = service_order.payment_details or []
+            total_added = Decimal("0")
+            formas = []
+
+            for pag in payments:
+                amount = pag.get("amount")
+                forma = pag.get("forma_pagamento", "")
+
+                if not amount or Decimal(str(amount)) <= 0:
+                    return Response(
+                        {"error": "Cada pagamento deve ter valor maior que zero."},
+                        status=status.HTTP_400_BAD_REQUEST,
+                    )
+
+                pag_amount = Decimal(str(amount))
+                total_added += pag_amount
+
+                current_details.append(
+                    {
+                        "amount": float(pag_amount),
+                        "forma_pagamento": forma,
+                        "tipo": "parcial",
+                        "data": timezone.now().isoformat(),
+                    }
+                )
+                if forma and forma not in formas:
+                    formas.append(forma)
+
+            service_order.payment_details = current_details
+            service_order.advance_payment = (
+                service_order.advance_payment or Decimal("0")
+            ) + total_added
+
+            # Atualizar payment_method
+            if formas:
+                existing_methods = service_order.payment_method or ""
+                new_methods = ", ".join(formas)
+                if existing_methods:
+                    service_order.payment_method = f"{existing_methods}, {new_methods}"
+                else:
+                    service_order.payment_method = new_methods
+
+            service_order.save()
+
+            return Response(
+                {
+                    "success": True,
+                    "message": "Pagamento adicionado com sucesso",
+                    "total_added": float(total_added),
+                    "new_advance_payment": float(service_order.advance_payment),
+                    "new_remaining_payment": float(service_order.remaining_payment),
+                }
+            )
+
+        except Exception as e:
+            return Response(
+                {"error": f"Erro ao adicionar pagamento: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
+class ServiceOrderChangePhaseAPIView(APIView):
+    """Alterar fase da OS (admin only) — permite reverter para fases anteriores"""
+
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request, order_id):
+        try:
+            service_order = get_object_or_404(ServiceOrder, id=order_id)
+
+            user_person = getattr(request.user, "person", None)
+            is_admin = user_person and user_person.person_type.type == "ADMINISTRADOR"
+            if not is_admin:
+                return Response(
+                    {"error": "Apenas administradores podem alterar a fase da OS."},
+                    status=status.HTTP_403_FORBIDDEN,
+                )
+
+            target_phase_name = request.data.get("target_phase", "").strip()
+            if not target_phase_name:
+                return Response(
+                    {"error": "target_phase é obrigatório."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+
+            target_phase = ServiceOrderPhase.objects.filter(
+                name=target_phase_name
+            ).first()
+            if not target_phase:
+                return Response(
+                    {"error": f"Fase '{target_phase_name}' não encontrada."},
+                    status=status.HTTP_404_NOT_FOUND,
+                )
+
+            old_phase_name = (
+                service_order.service_order_phase.name
+                if service_order.service_order_phase
+                else None
+            )
+
+            # Limpar campos de timestamp relevantes quando voltando de fase
+            if target_phase_name in ["PENDENTE"]:
+                service_order.production_date = None
+                service_order.data_retirado = None
+                service_order.data_devolvido = None
+                service_order.data_finalizado = None
+                service_order.data_recusa = None
+                service_order.justification_refusal = None
+                service_order.justification_reason = None
+                service_order.date_canceled = None
+                service_order.canceled_by = None
+                service_order.esta_atrasada = False
+            elif target_phase_name == "EM_PRODUCAO":
+                service_order.data_retirado = None
+                service_order.data_devolvido = None
+                service_order.data_finalizado = None
+                service_order.esta_atrasada = False
+            elif target_phase_name == "AGUARDANDO_RETIRADA":
+                service_order.data_retirado = None
+                service_order.data_devolvido = None
+                service_order.data_finalizado = None
+            elif target_phase_name == "AGUARDANDO_DEVOLUCAO":
+                service_order.data_devolvido = None
+                service_order.data_finalizado = None
+
+            service_order.service_order_phase = target_phase
+            service_order.save()
+
+            return Response(
+                {
+                    "success": True,
+                    "message": f"Fase alterada de {old_phase_name} para {target_phase_name}",
+                    "old_phase": old_phase_name,
+                    "new_phase": target_phase_name,
+                }
+            )
+
+        except Exception as e:
+            return Response(
+                {"error": f"Erro ao alterar fase: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
 
 
 @extend_schema(
@@ -4608,9 +4962,9 @@ class ServiceOrderPreTriageAPIView(APIView):
 
             # CPF é opcional na triagem - se fornecido, deve ser válido
             # Se is_infant=True, CPF não é necessário (será gerado automaticamente)
-            if cpf and len(cpf) != 11 and not is_infant:
+            if cpf and not is_infant and not validate_cpf(cpf):
                 return Response(
-                    {"error": "CPF inválido. Deve conter 11 dígitos ou ser deixado em branco."},
+                    {"error": "CPF inválido. Verifique os dígitos ou deixe em branco."},
                     status=status.HTTP_400_BAD_REQUEST,
                 )
 
