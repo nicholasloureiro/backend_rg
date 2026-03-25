@@ -462,10 +462,10 @@ class FrontendSignalSerializer(serializers.Serializer):
     """Serializer para dados do sinal"""
 
     total = serializers.DecimalField(
-        max_digits=10, decimal_places=2, help_text="Valor total do sinal"
+        max_digits=10, decimal_places=2, required=False, allow_null=True, help_text="Valor total do sinal"
     )
     pagamentos = FrontendPaymentItemSerializer(
-        many=True, help_text="Lista de pagamentos do sinal"
+        many=True, required=False, help_text="Lista de pagamentos do sinal"
     )
 
 
@@ -473,11 +473,11 @@ class FrontendPaymentSerializer(serializers.Serializer):
     """Serializer para dados de pagamento do payload do frontend"""
 
     total = serializers.DecimalField(
-        max_digits=10, decimal_places=2, help_text="Valor total"
+        max_digits=10, decimal_places=2, required=False, allow_null=True, help_text="Valor total"
     )
     sinal = FrontendSignalSerializer(required=False, help_text="Dados do sinal")
     restante = serializers.DecimalField(
-        max_digits=10, decimal_places=2, help_text="Valor restante"
+        max_digits=10, decimal_places=2, required=False, allow_null=True, help_text="Valor restante"
     )
     forma_pagamento = serializers.CharField(
         required=False,
@@ -499,11 +499,11 @@ class NullableDateField(serializers.DateField):
 class FrontendOrderServiceSerializer(serializers.Serializer):
     """Serializer para dados da ordem de serviço do payload do frontend"""
 
-    data_pedido = serializers.DateField(required=False, help_text="Data do pedido")
+    data_pedido = NullableDateField(required=False, allow_null=True, help_text="Data do pedido")
     data_evento = NullableDateField(
         required=False, allow_null=True, help_text="Data do evento"
     )
-    data_retirada = serializers.DateField(required=False, help_text="Data de retirada")
+    data_retirada = NullableDateField(required=False, allow_null=True, help_text="Data de retirada")
     data_prova = NullableDateField(
         required=False, allow_null=True, help_text="Data da prova"
     )

@@ -318,7 +318,11 @@ class ServiceOrderUpdateAPIView(APIView):
 
             # Validar dados com o serializer
             serializer = self.serializer_class(data=request.data)
-            serializer.is_valid(raise_exception=True)
+            if not serializer.is_valid():
+                return Response(
+                    {"error": "Dados inválidos", "details": serializer.errors},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
             data = serializer.validated_data
 
             # Processar dados da ordem de serviço
