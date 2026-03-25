@@ -727,24 +727,40 @@ class ServiceOrderUpdateAPIView(APIView):
                     is_full_update = True
 
             if is_full_update and not is_draft:
-                # Atualização completa - mover para EM_PRODUCAO
-                em_producao_phase = ServiceOrderPhase.objects.filter(
-                    name="EM_PRODUCAO"
-                ).first()
+                # Vendas vão direto para FINALIZADO (não precisam de produção/retirada/devolução)
+                is_sale_order = service_order.service_type in ["Compra", "Venda"]
 
-                if em_producao_phase and service_order.service_order_phase:
-                    # Só mover se não estiver já em EM_PRODUCAO, AGUARDANDO_RETIRADA ou fases posteriores
-                    current_phase_name = service_order.service_order_phase.name
-                    if current_phase_name not in [
-                        "EM_PRODUCAO",
-                        "AGUARDANDO_RETIRADA",
-                        "AGUARDANDO_DEVOLUCAO",
-                        "FINALIZADO",
-                        "RECUSADA",
-                    ]:
-                        service_order.service_order_phase = em_producao_phase
-                        service_order.production_date = date.today()
-                        service_order.save()
+                if is_sale_order:
+                    finalizado_phase = ServiceOrderPhase.objects.filter(
+                        name="FINALIZADO"
+                    ).first()
+                    if finalizado_phase and service_order.service_order_phase:
+                        current_phase_name = service_order.service_order_phase.name
+                        if current_phase_name not in ["FINALIZADO", "RECUSADA"]:
+                            service_order.service_order_phase = finalizado_phase
+                            service_order.data_finalizado = date.today()
+                            service_order.data_retirado = timezone.now()
+                            service_order.data_devolvido = timezone.now()
+                            service_order.save()
+                else:
+                    # Aluguel / Aluguel+Venda - mover para EM_PRODUCAO
+                    em_producao_phase = ServiceOrderPhase.objects.filter(
+                        name="EM_PRODUCAO"
+                    ).first()
+
+                    if em_producao_phase and service_order.service_order_phase:
+                        # Só mover se não estiver já em EM_PRODUCAO, AGUARDANDO_RETIRADA ou fases posteriores
+                        current_phase_name = service_order.service_order_phase.name
+                        if current_phase_name not in [
+                            "EM_PRODUCAO",
+                            "AGUARDANDO_RETIRADA",
+                            "AGUARDANDO_DEVOLUCAO",
+                            "FINALIZADO",
+                            "RECUSADA",
+                        ]:
+                            service_order.service_order_phase = em_producao_phase
+                            service_order.production_date = date.today()
+                            service_order.save()
 
             service_order.update(request.user)
 
@@ -4186,8 +4202,9 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
             except Exception:
                 adv = 0
 
-            if adv and float(adv) > 0:
-                if order.payment_details and isinstance(order.payment_details, list):
+            has_payment_details = order.payment_details and isinstance(order.payment_details, list)
+            if (adv and float(adv) > 0) or has_payment_details:
+                if has_payment_details:
                     # Get client name
                     client_name = order.renter.name if order.renter else order.client_name
 
