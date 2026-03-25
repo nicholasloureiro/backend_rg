@@ -5353,14 +5353,14 @@ class ServiceOrderPlanilhaAPIView(APIView):
             # Sort by date DESC, then OS id DESC
             rows.sort(key=lambda r: (r["data"] or "", r.get("numero_os") or 0), reverse=True)
 
-            # Totals
+            # Totals — OS count, fechadas, conversão only from sinal rows (OS creation day)
+            # Restante/parcial payments on other days should NOT inflate OS counts
             total_count = len(rows)
-            non_virtual_os = {r["numero_os"] for r in rows if r["numero_os"] and r["fase"] != "VIRTUAL"}
-            total_fechadas = sum(1 for r in rows if r.get("fechamento") == "SIM" and r.get("numero_os"))
-            # Count unique closed OS, not individual payments
-            closed_os = {r["numero_os"] for r in rows if r.get("fechamento") == "SIM" and r.get("numero_os")}
-            unique_os = {r["numero_os"] for r in rows if r.get("numero_os")}
-            taxa_conversao = round(len(closed_os) / len(unique_os) * 100, 1) if unique_os else 0
+            sinal_os = {r["numero_os"] for r in rows if r.get("numero_os") and r.get("tipo") == "sinal" and r["fase"] != "VIRTUAL"}
+            sinal_virtual = sum(1 for r in rows if r["fase"] == "VIRTUAL")
+            total_os_count = len(sinal_os) + sinal_virtual
+            closed_os = {r["numero_os"] for r in rows if r.get("numero_os") and r.get("tipo") == "sinal" and r.get("fechamento") == "SIM"}
+            taxa_conversao = round(len(closed_os) / len(sinal_os) * 100, 1) if sinal_os else 0
 
             # Total vendido = sum of total_value only from sinal payments (OS creation day)
             total_vendido = Decimal("0")
@@ -5374,7 +5374,7 @@ class ServiceOrderPlanilhaAPIView(APIView):
                     vendido_counted.add(os_id)
 
             totals = {
-                "total_os": total_count,
+                "total_os": total_os_count,
                 "total_fechadas": len(closed_os),
                 "taxa_conversao": taxa_conversao,
                 "total_recebido": float(total_recebido),
