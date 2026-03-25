@@ -4999,7 +4999,7 @@ class ServiceOrderPlanilhaAPIView(APIView):
                 page_size = 50
 
             qs = (
-                ServiceOrder.objects.filter(is_virtual=False)
+                ServiceOrder.objects.all()
                 .select_related(
                     "renter",
                     "employee",
@@ -5023,19 +5023,16 @@ class ServiceOrderPlanilhaAPIView(APIView):
                 qs = qs.filter(came_from__iexact=canal_filter)
 
             if atendente_filter:
-                qs = qs.filter(
-                    models.Q(attendant__name__icontains=atendente_filter)
-                    | models.Q(employee__name__icontains=atendente_filter)
-                )
+                qs = qs.filter(employee__name__icontains=atendente_filter)
 
             if search:
                 q = (
                     models.Q(renter__name__icontains=search)
                     | models.Q(renter__cpf__icontains=search)
-                    | models.Q(attendant__name__icontains=search)
                     | models.Q(employee__name__icontains=search)
                     | models.Q(came_from__icontains=search)
                     | models.Q(observations__icontains=search)
+                    | models.Q(client_name__icontains=search)
                 )
                 if search.isdigit():
                     q |= models.Q(id=int(search))
@@ -5046,9 +5043,12 @@ class ServiceOrderPlanilhaAPIView(APIView):
 
             agg = qs.aggregate(
                 total_os=Count("id"),
-                total_fechadas=Count("id", filter=DQ(service_order_phase__name__in=list(self.CONFIRMED_PHASES))),
+                total_fechadas=Count("id", filter=DQ(
+                    service_order_phase__name__in=list(self.CONFIRMED_PHASES),
+                    is_virtual=False,
+                )),
                 total_recebido=Sum("advance_payment"),
-                total_vendido=Sum("total_value"),
+                total_vendido=Sum("total_value", filter=DQ(is_virtual=False)),
             )
             total_os = agg["total_os"] or 0
             total_fechadas = agg["total_fechadas"] or 0
@@ -5091,29 +5091,47 @@ class ServiceOrderPlanilhaAPIView(APIView):
 
             results = []
             for order in orders:
-                phase_name = (
-                    order.service_order_phase.name
-                    if order.service_order_phase
-                    else ""
-                )
-                fechamento = "SIM" if phase_name in self.CONFIRMED_PHASES else "NÃO"
+                if order.is_virtual:
+                    results.append(
+                        {
+                            "data": order.order_date,
+                            "numero_os": "",
+                            "cliente": "",
+                            "atendente": "",
+                            "fechamento": "",
+                            "canal": "",
+                            "nome_cliente": order.client_name or (order.renter.name if order.renter else ""),
+                            "valor": float(order.advance_payment or 0),
+                            "forma_pgto": order.payment_method or "",
+                            "valor_total_venda": "",
+                            "justificativa": order.observations or "",
+                            "fase": "VIRTUAL",
+                        }
+                    )
+                else:
+                    phase_name = (
+                        order.service_order_phase.name
+                        if order.service_order_phase
+                        else ""
+                    )
+                    fechamento = "SIM" if phase_name in self.CONFIRMED_PHASES else "NÃO"
 
-                results.append(
-                    {
-                        "data": order.order_date,
-                        "numero_os": order.id,
-                        "cliente": order.renter_role or "",
-                        "atendente": order.attendant.name if order.attendant else (order.employee.name if order.employee else ""),
-                        "fechamento": fechamento,
-                        "canal": order.came_from or "",
-                        "nome_cliente": order.renter.name if order.renter else order.client_name or "",
-                        "valor": float(order.advance_payment or 0),
-                        "forma_pgto": order.payment_method or "",
-                        "valor_total_venda": float(order.total_value or 0),
-                        "justificativa": order.observations or "",
-                        "fase": phase_name,
-                    }
-                )
+                    results.append(
+                        {
+                            "data": order.order_date,
+                            "numero_os": order.id,
+                            "cliente": order.renter_role or "",
+                            "atendente": order.employee.name if order.employee else "",
+                            "fechamento": fechamento,
+                            "canal": order.came_from or "",
+                            "nome_cliente": order.renter.name if order.renter else order.client_name or "",
+                            "valor": float(order.advance_payment or 0),
+                            "forma_pgto": order.payment_method or "",
+                            "valor_total_venda": float(order.total_value or 0),
+                            "justificativa": order.observations or "",
+                            "fase": phase_name,
+                        }
+                    )
 
             return Response(
                 {
