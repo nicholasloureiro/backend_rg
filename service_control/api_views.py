@@ -4994,7 +4994,7 @@ class ServiceOrderPlanilhaAPIView(APIView):
             "nome_cliente": order.renter.name if order.renter else order.client_name or "",
             "valor": pag_amount,
             "forma_pgto": pag_method,
-            "valor_total_venda": float(order.total_value or 0),
+            "valor_total_venda": float(order.total_value or 0) if pag_tipo == "sinal" else "",
             "justificativa": order.observations or "",
             "fase": phase_name,
             "tipo": pag_tipo,
@@ -5110,12 +5110,12 @@ class ServiceOrderPlanilhaAPIView(APIView):
             unique_os = {r["numero_os"] for r in rows if r.get("numero_os")}
             taxa_conversao = round(len(closed_os) / len(unique_os) * 100, 1) if unique_os else 0
 
-            # Total vendido = sum of total_value for unique non-virtual OS in the results
+            # Total vendido = sum of total_value only from sinal payments (OS creation day)
             total_vendido = Decimal("0")
             vendido_counted = set()
             for r in rows:
                 os_id = r.get("numero_os")
-                if os_id and os_id not in vendido_counted and r["fase"] != "VIRTUAL":
+                if os_id and os_id not in vendido_counted and r["fase"] != "VIRTUAL" and r.get("tipo") == "sinal":
                     tv = r.get("valor_total_venda")
                     if tv and isinstance(tv, (int, float)):
                         total_vendido += Decimal(str(tv))
