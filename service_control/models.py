@@ -154,7 +154,8 @@ class ServiceOrder(BaseModel):
         db_table = "service_orders"
 
     def __str__(self):
-        return f"OS {self.id} - {self.renter.name}"
+        renter_name = self.renter.name if self.renter else "Sem cliente"
+        return f"OS {self.id} - {renter_name}"
 
     def save(self, *args, **kwargs):
         # Calcula automaticamente o valor restante

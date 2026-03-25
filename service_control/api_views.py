@@ -643,8 +643,13 @@ class ServiceOrderUpdateAPIView(APIView):
                                 created_by=request.user,
                             )
 
-            # Remover itens existentes
-            service_order.items.all().delete()
+            # Remover itens existentes (apenas se novos itens foram enviados)
+            has_new_items = (
+                ("ordem_servico" in data and "itens" in data["ordem_servico"])
+                or ("ordem_servico" in data and "acessorios" in data["ordem_servico"])
+            )
+            if has_new_items:
+                service_order.items.all().delete()
 
             if "ordem_servico" in data and "itens" in data["ordem_servico"]:
                 for item in data["ordem_servico"]["itens"]:
@@ -778,6 +783,8 @@ class ServiceOrderUpdateAPIView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         except Exception as e:
+            import traceback
+            logger.error(f"Erro ao atualizar OS {order_id}: {str(e)}\n{traceback.format_exc()}")
             return Response(
                 {"error": f"Erro ao atualizar OS: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
