@@ -5209,6 +5209,7 @@ class ServiceOrderPlanilhaAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
     CONFIRMED_PHASES = {
+        "PENDENTE",
         "EM_PRODUCAO",
         "AGUARDANDO_RETIRADA",
         "AGUARDANDO_DEVOLUCAO",
