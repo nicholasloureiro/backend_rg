@@ -5235,7 +5235,12 @@ class ServiceOrderPlanilhaAPIView(APIView):
             }
 
         phase_name = order.service_order_phase.name if order.service_order_phase else ""
-        fechamento = "SIM" if phase_name in self.CONFIRMED_PHASES else "NÃO"
+        if phase_name in self.CONFIRMED_PHASES:
+            fechamento = "SIM"
+        elif phase_name == "RECUSADA":
+            fechamento = "NÃO"
+        else:
+            fechamento = ""
         return {
             "data": pag_date,
             "numero_os": order.id,
