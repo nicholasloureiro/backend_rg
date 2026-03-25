@@ -5351,6 +5351,16 @@ class ServiceOrderPlanilhaAPIView(APIView):
                     total_recebido += order.advance_payment
                     seen_os_ids.add(order.id)
 
+                else:
+                    # Orders with no payments (e.g. PENDENTE) — show with valor=0
+                    fallback_date = str(order.order_date)
+                    if start_date and fallback_date < start_date:
+                        continue
+                    if end_date and fallback_date > end_date:
+                        continue
+                    rows.append(self._build_row(order, fallback_date, 0, "", "sinal"))
+                    seen_os_ids.add(order.id)
+
             # Sort by date DESC, then OS id DESC
             rows.sort(key=lambda r: (r["data"] or "", r.get("numero_os") or 0), reverse=True)
 
