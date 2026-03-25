@@ -4985,6 +4985,9 @@ class ServiceOrderPlanilhaAPIView(APIView):
             start_date = request.GET.get("start_date")
             end_date = request.GET.get("end_date")
             search = request.GET.get("search", "").strip()
+            fechamento_filter = request.GET.get("fechamento", "").strip()
+            canal_filter = request.GET.get("canal", "").strip()
+            atendente_filter = request.GET.get("atendente", "").strip()
 
             try:
                 page = max(int(request.GET.get("page", 1)), 1)
@@ -5011,6 +5014,20 @@ class ServiceOrderPlanilhaAPIView(APIView):
             if end_date:
                 qs = qs.filter(order_date__lte=end_date)
 
+            if fechamento_filter == "SIM":
+                qs = qs.filter(service_order_phase__name__in=list(self.CONFIRMED_PHASES))
+            elif fechamento_filter == "NAO":
+                qs = qs.exclude(service_order_phase__name__in=list(self.CONFIRMED_PHASES))
+
+            if canal_filter:
+                qs = qs.filter(came_from__iexact=canal_filter)
+
+            if atendente_filter:
+                qs = qs.filter(
+                    models.Q(attendant__name__icontains=atendente_filter)
+                    | models.Q(employee__name__icontains=atendente_filter)
+                )
+
             if search:
                 q = (
                     models.Q(renter__name__icontains=search)
@@ -5024,7 +5041,50 @@ class ServiceOrderPlanilhaAPIView(APIView):
                     q |= models.Q(id=int(search))
                 qs = qs.filter(q).distinct()
 
-            total_count = qs.count()
+            # Totals across ALL filtered results (not paginated)
+            from django.db.models import Sum, Count, Q as DQ
+
+            agg = qs.aggregate(
+                total_os=Count("id"),
+                total_fechadas=Count("id", filter=DQ(service_order_phase__name__in=list(self.CONFIRMED_PHASES))),
+                total_recebido=Sum("advance_payment"),
+                total_vendido=Sum("total_value"),
+            )
+            total_os = agg["total_os"] or 0
+            total_fechadas = agg["total_fechadas"] or 0
+            taxa_conversao = round((total_fechadas / total_os * 100), 1) if total_os > 0 else 0
+
+            totals = {
+                "total_os": total_os,
+                "total_fechadas": total_fechadas,
+                "taxa_conversao": taxa_conversao,
+                "total_recebido": float(agg["total_recebido"] or 0),
+                "total_vendido": float(agg["total_vendido"] or 0),
+            }
+
+            # Available filter options
+            all_os = ServiceOrder.objects.filter(is_virtual=False)
+            canais = sorted(
+                set(
+                    all_os.exclude(came_from__isnull=True)
+                    .exclude(came_from="")
+                    .values_list("came_from", flat=True)
+                    .distinct()
+                )
+            )
+            atendentes = sorted(
+                set(
+                    Person.objects.filter(
+                        models.Q(attendant_service_orders__isnull=False)
+                        | models.Q(employee_service_orders__isnull=False)
+                    )
+                    .values_list("name", flat=True)
+                    .distinct()
+                )
+            )
+
+            # Pagination
+            total_count = total_os
             total_pages = max((total_count + page_size - 1) // page_size, 1)
             start_idx = (page - 1) * page_size
             orders = qs[start_idx : start_idx + page_size]
@@ -5062,6 +5122,11 @@ class ServiceOrderPlanilhaAPIView(APIView):
                     "page_size": page_size,
                     "total_pages": total_pages,
                     "results": results,
+                    "totals": totals,
+                    "available_filters": {
+                        "canais": canais,
+                        "atendentes": atendentes,
+                    },
                 }
             )
 
