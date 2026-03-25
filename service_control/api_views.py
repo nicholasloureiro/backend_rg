@@ -2820,13 +2820,9 @@ class ServiceOrderListByPhaseAPIView(APIView):
 
             # Filtrar orders baseado na fase
             if phase.name == "ATRASADO":
-                # Fase ATRASADO: SOMENTE OS em AGUARDANDO_DEVOLUCAO que estão atrasadas na devolução
-                # OS atrasadas: inclui devolução atrasada, evento passado, e retirada atrasada
+                # Apenas ordens atrasadas na DEVOLUÇÃO (roupas não devolvidas)
                 aguardando_devolucao_phase = ServiceOrderPhase.objects.filter(
                     name="AGUARDANDO_DEVOLUCAO"
-                ).first()
-                aguardando_retirada_phase = ServiceOrderPhase.objects.filter(
-                    name="AGUARDANDO_RETIRADA"
                 ).first()
 
                 q_devolucao_atrasada = models.Q(
@@ -2840,14 +2836,10 @@ class ServiceOrderListByPhaseAPIView(APIView):
                     event__event_date__lt=today,
                     event__isnull=False,
                 )
-                q_retirada_atrasada = models.Q(
-                    service_order_phase=aguardando_retirada_phase,
-                    esta_atrasada=True,
-                )
 
                 orders = (
                     base_qs.filter(
-                        q_devolucao_atrasada | q_evento_passado_devolucao | q_retirada_atrasada
+                        q_devolucao_atrasada | q_evento_passado_devolucao
                     )
                     .distinct()
                     .select_related(
@@ -3440,32 +3432,23 @@ class ServiceOrderListByPhaseV2APIView(APIView):
                 aguardando_devolucao_phase = ServiceOrderPhase.objects.filter(
                     name="AGUARDANDO_DEVOLUCAO"
                 ).first()
-                aguardando_retirada_phase = ServiceOrderPhase.objects.filter(
-                    name="AGUARDANDO_RETIRADA"
-                ).first()
 
-                # Ordens atrasadas na devolução (com ou sem evento)
+                # Apenas ordens atrasadas na DEVOLUÇÃO (roupas não devolvidas)
                 q_devolucao_atrasada = models.Q(
                     service_order_phase=aguardando_devolucao_phase,
                     devolucao_date__lt=today,
                     data_devolvido__isnull=True,
                 )
-                # Ordens aguardando devolução cujo evento já passou
                 q_evento_passado_devolucao = models.Q(
                     service_order_phase=aguardando_devolucao_phase,
                     data_devolvido__isnull=True,
                     event__event_date__lt=today,
                     event__isnull=False,
                 )
-                # Ordens atrasadas na retirada
-                q_retirada_atrasada = models.Q(
-                    service_order_phase=aguardando_retirada_phase,
-                    esta_atrasada=True,
-                )
 
                 orders_qs = (
                     base_qs.filter(
-                        q_devolucao_atrasada | q_evento_passado_devolucao | q_retirada_atrasada
+                        q_devolucao_atrasada | q_evento_passado_devolucao
                     )
                     .distinct()
                     .select_related(
