@@ -4966,6 +4966,112 @@ class ServiceOrderClientAPIView(APIView):
         500: {"description": "Erro interno do servidor"},
     },
 )
+
+
+class ServiceOrderPlanilhaAPIView(APIView):
+    """Retorna dados de OS em formato planilha (flat/spreadsheet)."""
+
+    permission_classes = [IsAuthenticated]
+
+    CONFIRMED_PHASES = {
+        "EM_PRODUCAO",
+        "AGUARDANDO_RETIRADA",
+        "AGUARDANDO_DEVOLUCAO",
+        "FINALIZADO",
+    }
+
+    def get(self, request):
+        try:
+            start_date = request.GET.get("start_date")
+            end_date = request.GET.get("end_date")
+            search = request.GET.get("search", "").strip()
+
+            try:
+                page = max(int(request.GET.get("page", 1)), 1)
+            except (TypeError, ValueError):
+                page = 1
+            try:
+                page_size = max(int(request.GET.get("page_size", 50)), 1)
+            except (TypeError, ValueError):
+                page_size = 50
+
+            qs = (
+                ServiceOrder.objects.filter(is_virtual=False)
+                .select_related(
+                    "renter",
+                    "employee",
+                    "attendant",
+                    "service_order_phase",
+                )
+                .order_by("-order_date", "-id")
+            )
+
+            if start_date:
+                qs = qs.filter(order_date__gte=start_date)
+            if end_date:
+                qs = qs.filter(order_date__lte=end_date)
+
+            if search:
+                q = (
+                    models.Q(renter__name__icontains=search)
+                    | models.Q(renter__cpf__icontains=search)
+                    | models.Q(attendant__name__icontains=search)
+                    | models.Q(employee__name__icontains=search)
+                    | models.Q(came_from__icontains=search)
+                    | models.Q(observations__icontains=search)
+                )
+                if search.isdigit():
+                    q |= models.Q(id=int(search))
+                qs = qs.filter(q).distinct()
+
+            total_count = qs.count()
+            total_pages = max((total_count + page_size - 1) // page_size, 1)
+            start_idx = (page - 1) * page_size
+            orders = qs[start_idx : start_idx + page_size]
+
+            results = []
+            for order in orders:
+                phase_name = (
+                    order.service_order_phase.name
+                    if order.service_order_phase
+                    else ""
+                )
+                fechamento = "SIM" if phase_name in self.CONFIRMED_PHASES else "NÃO"
+
+                results.append(
+                    {
+                        "data": order.order_date,
+                        "numero_os": order.id,
+                        "cliente": order.renter_role or "",
+                        "atendente": order.attendant.name if order.attendant else (order.employee.name if order.employee else ""),
+                        "fechamento": fechamento,
+                        "canal": order.came_from or "",
+                        "nome_cliente": order.renter.name if order.renter else order.client_name or "",
+                        "valor": float(order.advance_payment or 0),
+                        "forma_pgto": order.payment_method or "",
+                        "valor_total_venda": float(order.total_value or 0),
+                        "justificativa": order.observations or "",
+                        "fase": phase_name,
+                    }
+                )
+
+            return Response(
+                {
+                    "count": total_count,
+                    "page": page,
+                    "page_size": page_size,
+                    "total_pages": total_pages,
+                    "results": results,
+                }
+            )
+
+        except Exception as e:
+            return Response(
+                {"error": f"Erro ao gerar planilha: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+
 class ServiceOrderPreTriageAPIView(APIView):
     permission_classes = [IsAuthenticated]
 

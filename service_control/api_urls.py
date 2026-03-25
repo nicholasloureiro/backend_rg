@@ -28,6 +28,7 @@ from .api_views import (
     ServiceOrderMarkPaidAPIView,
     ServiceOrderMarkReadyAPIView,
     ServiceOrderMarkRetrievedAPIView,
+    ServiceOrderPlanilhaAPIView,
     ServiceOrderPreTriageAPIView,
     ServiceOrderRefundAPIView,
     ServiceOrderRefuseAPIView,
@@ -182,6 +183,11 @@ urlpatterns = [
         "service-orders/renter/<int:renter_id>/",
         ServiceOrderListByClientAPIView.as_view(),
         name="api_service_order_by_client",
+    ),
+    path(
+        "service-orders/planilha/",
+        ServiceOrderPlanilhaAPIView.as_view(),
+        name="api_service_order_planilha",
     ),
     path(
         "service-orders/pre-triage/",
