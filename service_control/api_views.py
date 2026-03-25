@@ -887,16 +887,139 @@ class ServiceOrderUpdateAPIView(APIView):
                             non_sinal = [e for e in existing if e.get("tipo") != "sinal"]
                             service_order.payment_details = non_sinal + new_entries
 
-            # Nome do cliente (sem validar CPF, sem merge, sem criar pessoa)
-            if cliente_data.get("nome") and service_order.renter:
-                service_order.renter.name = cliente_data["nome"].upper()
-                service_order.renter.save()
+            # Observações
+            if os_data.get("observacoes") is not None:
+                service_order.observations = os_data["observacoes"]
 
             # Parceria
             if "is_partnership" in os_data:
                 service_order.is_partnership = bool(os_data["is_partnership"])
             if os_data.get("partnership_type"):
                 service_order.partnership_type = os_data["partnership_type"]
+
+            # Itens e acessórios (se enviados, substituir os existentes)
+            itens = os_data.get("itens", [])
+            acessorios = os_data.get("acessorios", [])
+            if itens or acessorios:
+                service_order.items.all().delete()
+
+                def clean_field(value):
+                    if value is None:
+                        return None
+                    if isinstance(value, str):
+                        return value.strip() if value.strip() else None
+                    return value
+
+                for item in itens:
+                    try:
+                        temp_product = TemporaryProduct.objects.create(
+                            product_type=item.get("tipo", ""),
+                            size=clean_field(item.get("numero")),
+                            sleeve_length=clean_field(item.get("manga")),
+                            color=clean_field(item.get("cor")),
+                            brand=clean_field(item.get("marca")),
+                            description=clean_field(item.get("extras")),
+                            venda=item.get("venda", False),
+                            created_by=request.user,
+                        )
+                        if item.get("tipo") == "calca":
+                            temp_product.waist_size = clean_field(item.get("cintura"))
+                            temp_product.leg_length = clean_field(item.get("perna"))
+                            temp_product.ajuste_cintura = clean_field(item.get("ajuste_cintura"))
+                            temp_product.ajuste_comprimento = clean_field(item.get("ajuste_comprimento"))
+                            temp_product.save()
+                        ServiceOrderItem.objects.create(
+                            service_order=service_order,
+                            temporary_product=temp_product,
+                            adjustment_needed=bool(clean_field(item.get("ajuste"))),
+                            adjustment_notes=clean_field(item.get("ajuste")),
+                            created_by=request.user,
+                        )
+                    except Exception:
+                        pass
+
+                for acessorio in acessorios:
+                    try:
+                        temp_product = TemporaryProduct.objects.create(
+                            product_type=acessorio.get("tipo", ""),
+                            size=clean_field(acessorio.get("numero")),
+                            color=clean_field(acessorio.get("cor")),
+                            brand=clean_field(acessorio.get("marca")),
+                            description=clean_field(acessorio.get("descricao")),
+                            extensor=acessorio.get("extensor", False),
+                            venda=acessorio.get("venda", False),
+                            created_by=request.user,
+                        )
+                        ServiceOrderItem.objects.create(
+                            service_order=service_order,
+                            temporary_product=temp_product,
+                            created_by=request.user,
+                        )
+                    except Exception:
+                        pass
+
+            # Cliente (sem validação de CPF, sem merge)
+            if service_order.renter:
+                renter = service_order.renter
+                if cliente_data.get("nome"):
+                    renter.name = cliente_data["nome"].upper()
+                # CPF — salvar sem validação algorítmica
+                cpf_raw = cliente_data.get("cpf", "") or ""
+                cpf_limpo = cpf_raw.replace(".", "").replace("-", "").strip()
+                if cpf_limpo and not renter.cpf:
+                    renter.cpf = cpf_limpo
+                if cliente_data.get("is_infant"):
+                    renter.is_infant = True
+                renter.save()
+
+                # Contatos
+                telefone = ""
+                contatos = cliente_data.get("contatos", [])
+                if contatos:
+                    for c in contatos:
+                        if c.get("tipo") == "telefone" and c.get("valor"):
+                            telefone = c["valor"].strip()
+                            break
+                email = (cliente_data.get("email") or "").strip() or None
+                if telefone or email:
+                    existing_contact = PersonsContacts.objects.filter(
+                        person=renter, phone=telefone or None, email=email,
+                    ).first()
+                    if not existing_contact:
+                        PersonsContacts.objects.create(
+                            person=renter, phone=telefone or None, email=email,
+                            created_by=request.user,
+                        )
+
+                # Endereços
+                enderecos = cliente_data.get("enderecos", [])
+                if enderecos:
+                    endereco = enderecos[-1]
+                    cidade_nome = endereco.get("cidade", "").strip()
+                    if cidade_nome:
+                        try:
+                            city_obj = City.objects.filter(name__iexact=cidade_nome.upper()).first()
+                            if city_obj:
+                                existing_addr = PersonsAdresses.objects.filter(
+                                    person=renter,
+                                    street=endereco.get("rua") or "",
+                                    number=endereco.get("numero") or "",
+                                    cep=endereco.get("cep") or "",
+                                    city=city_obj,
+                                ).first()
+                                if not existing_addr:
+                                    PersonsAdresses.objects.create(
+                                        person=renter,
+                                        street=endereco.get("rua") or "",
+                                        number=endereco.get("numero") or "",
+                                        cep=endereco.get("cep") or "",
+                                        neighborhood=endereco.get("bairro") or "",
+                                        complemento=endereco.get("complemento") or "",
+                                        city=city_obj,
+                                        created_by=request.user,
+                                    )
+                        except Exception:
+                            pass
 
             service_order.save()
 
