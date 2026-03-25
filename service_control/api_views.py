@@ -316,6 +316,11 @@ class ServiceOrderUpdateAPIView(APIView):
         try:
             service_order = get_object_or_404(ServiceOrder, id=order_id)
 
+            # Draft mode — salva dados parciais sem validação
+            is_draft = request.query_params.get("draft", "").lower() == "true"
+            if is_draft:
+                return self._save_draft(request, service_order)
+
             # Validar dados com o serializer
             serializer = self.serializer_class(data=request.data)
             if not serializer.is_valid():
@@ -791,6 +796,119 @@ class ServiceOrderUpdateAPIView(APIView):
             logger.error(f"Erro ao atualizar OS {order_id}: {str(e)}\n{traceback.format_exc()}")
             return Response(
                 {"error": f"Erro ao atualizar OS: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            )
+
+    def _save_draft(self, request, service_order):
+        """Salva rascunho sem validação — aceita qualquer combinação parcial de dados."""
+        try:
+            raw = request.data
+            os_data = raw.get("ordem_servico", {}) or {}
+            cliente_data = raw.get("cliente", {}) or {}
+
+            # Datas (só salva se não vazio)
+            if os_data.get("data_pedido"):
+                try:
+                    service_order.order_date = os_data["data_pedido"]
+                except Exception:
+                    pass
+            if os_data.get("data_retirada"):
+                try:
+                    service_order.retirada_date = os_data["data_retirada"]
+                except Exception:
+                    pass
+            if os_data.get("data_devolucao"):
+                try:
+                    service_order.devolucao_date = os_data["data_devolucao"]
+                except Exception:
+                    pass
+            if os_data.get("data_prova"):
+                try:
+                    service_order.prova_date = os_data["data_prova"]
+                except Exception:
+                    pass
+
+            # Campos de texto
+            if os_data.get("ocasiao"):
+                service_order.renter_role = os_data["ocasiao"].upper()
+            if os_data.get("origem"):
+                service_order.came_from = os_data["origem"].upper()
+            if os_data.get("modalidade"):
+                service_order.service_type = os_data["modalidade"]
+                if os_data["modalidade"] in ["Compra", "Venda"]:
+                    service_order.purchase = True
+                    service_order.devolucao_date = None
+                else:
+                    service_order.purchase = False
+
+            # Atendente
+            if os_data.get("employee_id"):
+                try:
+                    service_order.employee = Person.objects.get(id=os_data["employee_id"])
+                except Person.DoesNotExist:
+                    pass
+
+            # Pagamento
+            pagamento = os_data.get("pagamento", {}) or {}
+            if pagamento.get("total") is not None:
+                try:
+                    service_order.total_value = Decimal(str(pagamento["total"]))
+                except Exception:
+                    pass
+
+            if pagamento.get("sinal"):
+                sinal = pagamento["sinal"]
+                if isinstance(sinal, dict):
+                    if sinal.get("total") is not None:
+                        try:
+                            service_order.advance_payment = Decimal(str(sinal["total"]))
+                        except Exception:
+                            pass
+                    if sinal.get("pagamentos"):
+                        formas = []
+                        new_entries = []
+                        data_sinal = timezone.now().isoformat()
+                        for pag in sinal["pagamentos"]:
+                            forma = pag.get("forma_pagamento")
+                            amount = pag.get("amount", 0)
+                            if forma and amount:
+                                if forma not in formas:
+                                    formas.append(forma)
+                                new_entries.append({
+                                    "amount": float(amount),
+                                    "forma_pagamento": forma,
+                                    "tipo": "sinal",
+                                    "data": data_sinal,
+                                })
+                        if formas:
+                            service_order.payment_method = ", ".join(formas)
+                        if new_entries:
+                            existing = service_order.payment_details or []
+                            non_sinal = [e for e in existing if e.get("tipo") != "sinal"]
+                            service_order.payment_details = non_sinal + new_entries
+
+            # Nome do cliente (sem validar CPF, sem merge, sem criar pessoa)
+            if cliente_data.get("nome") and service_order.renter:
+                service_order.renter.name = cliente_data["nome"].upper()
+                service_order.renter.save()
+
+            # Parceria
+            if "is_partnership" in os_data:
+                service_order.is_partnership = bool(os_data["is_partnership"])
+            if os_data.get("partnership_type"):
+                service_order.partnership_type = os_data["partnership_type"]
+
+            service_order.save()
+
+            return Response(
+                {"success": True, "message": "Rascunho salvo com sucesso"},
+            )
+
+        except Exception as e:
+            import traceback
+            logger.error(f"Erro ao salvar rascunho OS {service_order.id}: {str(e)}\n{traceback.format_exc()}")
+            return Response(
+                {"error": f"Erro ao salvar rascunho: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
