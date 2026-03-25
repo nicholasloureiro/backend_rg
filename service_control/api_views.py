@@ -4980,6 +4980,43 @@ class ServiceOrderPlanilhaAPIView(APIView):
         "FINALIZADO",
     }
 
+    def _build_row(self, order, pag_date, pag_amount, pag_method, pag_tipo):
+        """Build a single planilha row from an order + payment entry."""
+        if order.is_virtual:
+            return {
+                "data": pag_date,
+                "numero_os": "",
+                "cliente": "",
+                "atendente": "",
+                "fechamento": "",
+                "canal": "",
+                "nome_cliente": order.client_name or (order.renter.name if order.renter else ""),
+                "valor": pag_amount,
+                "forma_pgto": pag_method,
+                "valor_total_venda": "",
+                "justificativa": order.observations or "",
+                "fase": "VIRTUAL",
+                "tipo": pag_tipo,
+            }
+
+        phase_name = order.service_order_phase.name if order.service_order_phase else ""
+        fechamento = "SIM" if phase_name in self.CONFIRMED_PHASES else "NÃO"
+        return {
+            "data": pag_date,
+            "numero_os": order.id,
+            "cliente": order.renter_role or "",
+            "atendente": order.employee.name if order.employee else "",
+            "fechamento": fechamento,
+            "canal": order.came_from or "",
+            "nome_cliente": order.renter.name if order.renter else order.client_name or "",
+            "valor": pag_amount,
+            "forma_pgto": pag_method,
+            "valor_total_venda": float(order.total_value or 0),
+            "justificativa": order.observations or "",
+            "fase": phase_name,
+            "tipo": pag_tipo,
+        }
+
     def get(self, request):
         try:
             start_date = request.GET.get("start_date")
@@ -4998,22 +5035,17 @@ class ServiceOrderPlanilhaAPIView(APIView):
             except (TypeError, ValueError):
                 page_size = 50
 
+            # Query all orders with payment data
             qs = (
                 ServiceOrder.objects.all()
                 .select_related(
                     "renter",
                     "employee",
-                    "attendant",
                     "service_order_phase",
                 )
-                .order_by("-order_date", "-id")
             )
 
-            if start_date:
-                qs = qs.filter(order_date__gte=start_date)
-            if end_date:
-                qs = qs.filter(order_date__lte=end_date)
-
+            # Pre-filter by OS-level fields
             if fechamento_filter == "SIM":
                 qs = qs.filter(service_order_phase__name__in=list(self.CONFIRMED_PHASES))
             elif fechamento_filter == "NAO":
@@ -5038,100 +5070,100 @@ class ServiceOrderPlanilhaAPIView(APIView):
                     q |= models.Q(id=int(search))
                 qs = qs.filter(q).distinct()
 
-            # Totals across ALL filtered results (not paginated)
-            from django.db.models import Sum, Count, Q as DQ
+            # Build payment-level rows (one row per payment entry)
+            rows = []
+            seen_os_ids = set()
+            total_recebido = Decimal("0")
 
-            agg = qs.aggregate(
-                total_os=Count("id"),
-                total_fechadas=Count("id", filter=DQ(
-                    service_order_phase__name__in=list(self.CONFIRMED_PHASES),
-                    is_virtual=False,
-                )),
-                total_recebido=Sum("advance_payment"),
-                total_vendido=Sum("total_value", filter=DQ(is_virtual=False)),
-            )
-            total_os = agg["total_os"] or 0
-            total_fechadas = agg["total_fechadas"] or 0
-            taxa_conversao = round((total_fechadas / total_os * 100), 1) if total_os > 0 else 0
+            for order in qs.iterator():
+                if order.payment_details and isinstance(order.payment_details, list):
+                    for pag in order.payment_details:
+                        amt = float(pag.get("amount", 0))
+                        if amt <= 0 and pag.get("tipo") != "estorno":
+                            continue
+                        pm = pag.get("forma_pagamento", "")
+                        tipo = pag.get("tipo", "sinal")
+                        pag_data = pag.get("data", "")
+                        pag_date = pag_data[:10] if pag_data else str(order.order_date)
+
+                        # Date filter on payment date
+                        if start_date and pag_date < start_date:
+                            continue
+                        if end_date and pag_date > end_date:
+                            continue
+
+                        effective_amt = -abs(amt) if tipo == "estorno" else amt
+
+                        rows.append(self._build_row(order, pag_date, effective_amt, pm, tipo))
+                        total_recebido += Decimal(str(effective_amt))
+                        seen_os_ids.add(order.id)
+
+                elif order.advance_payment and float(order.advance_payment) > 0:
+                    # Fallback: no payment_details, use advance_payment with order_date
+                    fallback_date = str(order.order_date)
+                    if start_date and fallback_date < start_date:
+                        continue
+                    if end_date and fallback_date > end_date:
+                        continue
+
+                    rows.append(self._build_row(
+                        order, fallback_date,
+                        float(order.advance_payment),
+                        order.payment_method or "",
+                        "sinal",
+                    ))
+                    total_recebido += order.advance_payment
+                    seen_os_ids.add(order.id)
+
+            # Sort by date DESC, then OS id DESC
+            rows.sort(key=lambda r: (r["data"] or "", r.get("numero_os") or 0), reverse=True)
+
+            # Totals
+            total_count = len(rows)
+            non_virtual_os = {r["numero_os"] for r in rows if r["numero_os"] and r["fase"] != "VIRTUAL"}
+            total_fechadas = sum(1 for r in rows if r.get("fechamento") == "SIM" and r.get("numero_os"))
+            # Count unique closed OS, not individual payments
+            closed_os = {r["numero_os"] for r in rows if r.get("fechamento") == "SIM" and r.get("numero_os")}
+            unique_os = {r["numero_os"] for r in rows if r.get("numero_os")}
+            taxa_conversao = round(len(closed_os) / len(unique_os) * 100, 1) if unique_os else 0
+
+            # Total vendido = sum of total_value for unique non-virtual OS in the results
+            total_vendido = Decimal("0")
+            vendido_counted = set()
+            for r in rows:
+                os_id = r.get("numero_os")
+                if os_id and os_id not in vendido_counted and r["fase"] != "VIRTUAL":
+                    tv = r.get("valor_total_venda")
+                    if tv and isinstance(tv, (int, float)):
+                        total_vendido += Decimal(str(tv))
+                    vendido_counted.add(os_id)
 
             totals = {
-                "total_os": total_os,
-                "total_fechadas": total_fechadas,
+                "total_os": total_count,
+                "total_fechadas": len(closed_os),
                 "taxa_conversao": taxa_conversao,
-                "total_recebido": float(agg["total_recebido"] or 0),
-                "total_vendido": float(agg["total_vendido"] or 0),
+                "total_recebido": float(total_recebido),
+                "total_vendido": float(total_vendido),
             }
 
             # Available filter options
             all_os = ServiceOrder.objects.filter(is_virtual=False)
-            canais = sorted(
-                set(
-                    all_os.exclude(came_from__isnull=True)
-                    .exclude(came_from="")
-                    .values_list("came_from", flat=True)
-                    .distinct()
-                )
-            )
-            atendentes = sorted(
-                set(
-                    Person.objects.filter(
-                        models.Q(attendant_service_orders__isnull=False)
-                        | models.Q(employee_service_orders__isnull=False)
-                    )
-                    .values_list("name", flat=True)
-                    .distinct()
-                )
-            )
+            canais = sorted(set(
+                all_os.exclude(came_from__isnull=True)
+                .exclude(came_from="")
+                .values_list("came_from", flat=True)
+                .distinct()
+            ))
+            atendentes = sorted(set(
+                Person.objects.filter(employee_service_orders__isnull=False)
+                .values_list("name", flat=True)
+                .distinct()
+            ))
 
             # Pagination
-            total_count = total_os
             total_pages = max((total_count + page_size - 1) // page_size, 1)
             start_idx = (page - 1) * page_size
-            orders = qs[start_idx : start_idx + page_size]
-
-            results = []
-            for order in orders:
-                if order.is_virtual:
-                    results.append(
-                        {
-                            "data": order.order_date,
-                            "numero_os": "",
-                            "cliente": "",
-                            "atendente": "",
-                            "fechamento": "",
-                            "canal": "",
-                            "nome_cliente": order.client_name or (order.renter.name if order.renter else ""),
-                            "valor": float(order.advance_payment or 0),
-                            "forma_pgto": order.payment_method or "",
-                            "valor_total_venda": "",
-                            "justificativa": order.observations or "",
-                            "fase": "VIRTUAL",
-                        }
-                    )
-                else:
-                    phase_name = (
-                        order.service_order_phase.name
-                        if order.service_order_phase
-                        else ""
-                    )
-                    fechamento = "SIM" if phase_name in self.CONFIRMED_PHASES else "NÃO"
-
-                    results.append(
-                        {
-                            "data": order.order_date,
-                            "numero_os": order.id,
-                            "cliente": order.renter_role or "",
-                            "atendente": order.employee.name if order.employee else "",
-                            "fechamento": fechamento,
-                            "canal": order.came_from or "",
-                            "nome_cliente": order.renter.name if order.renter else order.client_name or "",
-                            "valor": float(order.advance_payment or 0),
-                            "forma_pgto": order.payment_method or "",
-                            "valor_total_venda": float(order.total_value or 0),
-                            "justificativa": order.observations or "",
-                            "fase": phase_name,
-                        }
-                    )
+            paginated = rows[start_idx : start_idx + page_size]
 
             return Response(
                 {
@@ -5139,7 +5171,7 @@ class ServiceOrderPlanilhaAPIView(APIView):
                     "page": page,
                     "page_size": page_size,
                     "total_pages": total_pages,
-                    "results": results,
+                    "results": paginated,
                     "totals": totals,
                     "available_filters": {
                         "canais": canais,
