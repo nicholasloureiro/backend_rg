@@ -4236,7 +4236,7 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                             continue
 
                         if amt > 0 or tipo == "estorno":
-                            # Estornos são subtraídos do total
+                            # Apenas estornos são subtraídos (indenização é pagamento do cliente)
                             effective_amt = -abs(amt) if tipo == "estorno" else amt
                             transactions.append({
                                 "order_id": order.id,
