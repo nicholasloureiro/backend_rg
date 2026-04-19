@@ -5483,7 +5483,6 @@ class ServiceOrderPreTriageAPIView(APIView):
         try:
             data = request.data
             cpf_raw = data.get("cpf", "") or ""
-            print(cpf_raw)
             cpf = cpf_raw.replace(".", "").replace("-", "").strip()
             is_infant = data.get("is_infant", False)
 
@@ -5535,17 +5534,22 @@ class ServiceOrderPreTriageAPIView(APIView):
 
             # Criar contato apenas se pelo menos um (email ou telefone) foi fornecido
             if email or telefone:
-                PersonsContacts.objects.get_or_create(
-                    phone=telefone,
-                    person=person,
-                    defaults={"email": email, "created_by": request.user},
-                )
+                contact_exists = PersonsContacts.objects.filter(
+                    phone=telefone, person=person
+                ).exists()
+                if not contact_exists:
+                    PersonsContacts.objects.create(
+                        phone=telefone,
+                        person=person,
+                        email=email,
+                        created_by=request.user,
+                    )
             endereco = data.get("endereco", {})
             cidade_nome = endereco.get("cidade")
             if cidade_nome:
                 city_obj = City.objects.filter(name__iexact=cidade_nome.upper()).first()
                 if city_obj:
-                    PersonsAdresses.objects.get_or_create(
+                    address_lookup = dict(
                         person=person,
                         street=endereco.get("rua") or "",
                         number=endereco.get("numero") or "",
@@ -5553,8 +5557,11 @@ class ServiceOrderPreTriageAPIView(APIView):
                         complemento=endereco.get("complemento") or "",
                         neighborhood=endereco.get("bairro") or "",
                         city=city_obj,
-                        defaults={"created_by": request.user},
                     )
+                    if not PersonsAdresses.objects.filter(**address_lookup).exists():
+                        PersonsAdresses.objects.create(
+                            **address_lookup, created_by=request.user
+                        )
             # Atendente é opcional - será vinculado depois na criação da OS
             atendente_id = data.get("atendente_id")
             atendente = None
