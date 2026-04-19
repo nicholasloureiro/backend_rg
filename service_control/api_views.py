@@ -5483,6 +5483,7 @@ class ServiceOrderPreTriageAPIView(APIView):
         try:
             data = request.data
             cpf_raw = data.get("cpf", "") or ""
+            print(cpf_raw)
             cpf = cpf_raw.replace(".", "").replace("-", "").strip()
             is_infant = data.get("is_infant", False)
 
