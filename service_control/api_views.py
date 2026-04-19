@@ -4593,8 +4593,16 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                 totals_by_method[key] = Decimal("0")
             totals_by_method[key] += Decimal(str(t.get("amount")))
 
-        # Sort transactions by date and time (most recent first)
-        transactions.sort(key=lambda t: (t.get("date") or "", t.get("time") or ""), reverse=True)
+        # Sort transactions by date and time (most recent first).
+        # Some "date" values are strings (from payment_details), others are
+        # date/datetime objects (fallback to order_date / data_devolvido).
+        # Coerce everything to string to avoid TypeError on mixed-type compare.
+        def _sort_key(t):
+            d = t.get("date")
+            tm = t.get("time")
+            return (str(d) if d is not None else "", str(tm) if tm is not None else "")
+
+        transactions.sort(key=_sort_key, reverse=True)
 
         # Aplicar paginação às transações
         total_transactions = len(transactions)
