@@ -2307,7 +2307,10 @@ class ServiceOrderDashboardAPIView(APIView):
                     pag_data = pag.get("data", "")
                     pag_date = pag_data[:10] if pag_data else None
                     if pag_date and data_inicio_str <= pag_date <= data_fim_str:
-                        total_recebido += Decimal(str(pag.get("amount", 0)))
+                        amt = Decimal(str(pag.get("amount", 0)))
+                        if pag.get("tipo") == "estorno":
+                            amt = -abs(amt)
+                        total_recebido += amt
 
         # Include virtual payments by their actual payment date
         virtual_orders = ServiceOrder.objects.filter(is_virtual=True).exclude(payment_details__isnull=True)
@@ -2317,7 +2320,10 @@ class ServiceOrderDashboardAPIView(APIView):
                     pag_data = pag.get("data", "")
                     pag_date = pag_data[:10] if pag_data else None
                     if pag_date and data_inicio_str <= pag_date <= data_fim_str:
-                        total_recebido += Decimal(str(pag.get("amount", 0)))
+                        amt = Decimal(str(pag.get("amount", 0)))
+                        if pag.get("tipo") == "estorno":
+                            amt = -abs(amt)
+                        total_recebido += amt
 
         # Taxa de conversão
         taxa_conversao = round(
@@ -2818,6 +2824,8 @@ class ServiceOrderDashboardAPIView(APIView):
                     pag_date = pag_data[:10] if pag_data else None
                     if pag_date:
                         amt = float(pag.get("amount", 0))
+                        if pag.get("tipo") == "estorno":
+                            amt = -abs(amt)
                         # Check each period
                         if pag_date == today_str:
                             resultados["dia"]["total_recebido"] += amt
@@ -2837,6 +2845,8 @@ class ServiceOrderDashboardAPIView(APIView):
                     pag_date = pag_data[:10] if pag_data else None
                     if pag_date:
                         amt = float(pag.get("amount", 0))
+                        if pag.get("tipo") == "estorno":
+                            amt = -abs(amt)
                         if pag_date == today_str:
                             resultados["dia"]["total_recebido"] += amt
                         if week_start_str <= pag_date <= today_str:
