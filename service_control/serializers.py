@@ -275,6 +275,7 @@ class VirtualServiceOrderCreateSerializer(serializers.Serializer):
     sinal = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Pagamento do sinal")
     restante = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Pagamento do restante")
     indenizacao = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Pagamento de indenização")
+    estorno = VirtualPaymentItemSerializer(required=False, allow_null=True, help_text="Estorno (dinheiro saindo, será registrado como negativo)")
     observations = serializers.CharField(required=False, allow_blank=True, allow_null=True, help_text="Observações")
 
 

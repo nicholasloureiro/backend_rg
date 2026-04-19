@@ -6,6 +6,8 @@ Usage:
     pytest tests/test_cpf.py        # a single file
     pytest -k planilha              # keyword filter
     pytest --reuse-db               # skip DB teardown (faster)
+
+Tests run against in-memory SQLite via roupadegala.settings_test.
 """
 import pytest
 from django.contrib.auth.models import User

@@ -339,14 +339,15 @@ class ServiceOrderUpdateAPIView(APIView):
                     old_order_date = service_order.order_date
                     if str(new_order_date) != str(old_order_date):
                         service_order.order_date = new_order_date
-                        # Sincronizar data dos pagamentos sinal com a nova data
+                        # Sincronizar a data de TODOS os pagamentos com a nova order_date
+                        # (sinal, restante, parcial, indenização, estorno). Semântica:
+                        # "essa OS foi realmente feita nessa data, então seus pagamentos
+                        # pertencem a essa data para fins de relatório".
                         if service_order.payment_details:
                             for entry in service_order.payment_details:
-                                if entry.get("tipo") == "sinal":
-                                    old_data = entry.get("data", "")
-                                    # Preservar horário, atualizar data
-                                    time_part = old_data[10:] if len(old_data) > 10 else ""
-                                    entry["data"] = str(new_order_date) + time_part
+                                old_data = entry.get("data", "")
+                                time_part = old_data[10:] if len(old_data) > 10 else ""
+                                entry["data"] = str(new_order_date) + time_part
                 if "data_retirada" in os_data:
                     service_order.retirada_date = os_data["data_retirada"]
                 if "data_devolucao" in os_data:
@@ -426,11 +427,18 @@ class ServiceOrderUpdateAPIView(APIView):
                                 for pag in sinal_data["pagamentos"]:
                                     forma = pag.get("forma_pagamento")
                                     amount = pag.get("amount", 0)
-                                    if forma:
+                                    # Require both a payment method AND a positive amount.
+                                    # Empty/zero entries (e.g. from a form redraw) must NOT
+                                    # overwrite a real existing sinal.
+                                    try:
+                                        amount_float = float(amount or 0)
+                                    except (TypeError, ValueError):
+                                        amount_float = 0.0
+                                    if forma and amount_float > 0:
                                         if forma not in formas:
                                             formas.append(forma)
                                         new_sinal_entries.append({
-                                            "amount": float(amount),
+                                            "amount": amount_float,
                                             "forma_pagamento": forma,
                                             "tipo": "sinal",
                                             "data": data_sinal
@@ -745,16 +753,17 @@ class ServiceOrderUpdateAPIView(APIView):
                 is_sale_order = service_order.service_type in ["Compra", "Venda"]
 
                 if is_sale_order:
-                    finalizado_phase = ServiceOrderPhase.objects.filter(
+                    finalizado_phase, _ = ServiceOrderPhase.objects.get_or_create(
                         name="FINALIZADO"
-                    ).first()
-                    if finalizado_phase and service_order.service_order_phase:
+                    )
+                    if service_order.service_order_phase:
                         current_phase_name = service_order.service_order_phase.name
                         if current_phase_name not in ["FINALIZADO", "RECUSADA"]:
                             service_order.service_order_phase = finalizado_phase
                             service_order.data_finalizado = date.today()
-                            service_order.data_retirado = timezone.now()
-                            service_order.data_devolvido = timezone.now()
+                            # Don't auto-set data_retirado / data_devolvido: the product
+                            # was never physically retrieved or returned. If the ops flow
+                            # needs those, use mark-retrieved explicitly (item #10).
                             service_order.save()
                 else:
                     # Aluguel / Aluguel+Venda - mover para EM_PRODUCAO
@@ -1999,7 +2008,18 @@ class ServiceOrderReturnToPendingAPIView(APIView):
             service_order.canceled_by = None
 
             if was_recusada:
-                service_order.data_resgate = date.today()
+                today = date.today()
+                service_order.data_resgate = today
+                # Ao resgatar, o atendimento passa a contar como uma venda do DIA ATUAL
+                # para fins de Dashboard/Planilha (que filtram por order_date e payment date).
+                service_order.order_date = today
+                # Re-estampar os pagamentos sinal com a data de hoje, preservando hora
+                if service_order.payment_details:
+                    for entry in service_order.payment_details:
+                        if entry.get("tipo") == "sinal":
+                            old_data = entry.get("data", "")
+                            time_part = old_data[10:] if len(old_data) > 10 else ""
+                            entry["data"] = str(today) + time_part
 
             service_order.save()
 
@@ -4262,6 +4282,22 @@ class VirtualServiceOrderCreateAPIView(APIView):
                 if indenizacao["forma_pagamento"] not in payment_methods:
                     payment_methods.append(indenizacao["forma_pagamento"])
 
+            if data.get("estorno"):
+                # Estorno = dinheiro saindo. Amount is stored positively in
+                # payment_details (tipo="estorno") but advance_payment is DECREASED
+                # so finance aggregations show negative value (item #5).
+                estorno = data["estorno"]
+                estorno_amount = Decimal(str(estorno["amount"]))
+                payment_details.append({
+                    "amount": float(estorno_amount),
+                    "forma_pagamento": estorno["forma_pagamento"],
+                    "tipo": "estorno",
+                    "data": timezone.now().isoformat(),
+                })
+                advance_payment -= estorno_amount
+                if estorno["forma_pagamento"] not in payment_methods:
+                    payment_methods.append(estorno["forma_pagamento"])
+
             service_order = ServiceOrder.objects.create(
                 renter=renter,
                 client_name=client_name,
@@ -4415,22 +4451,11 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
         transactions = []
         total_amount = Decimal("0")
 
-        CANDIDATE_EXCLUDED = {"RECUSADA", "CANCELADO", "CANCELADA", "CONCLUÍDO"}
-        existing_excluded = set(
-            ServiceOrderPhase.objects.filter(name__in=CANDIDATE_EXCLUDED).values_list(
-                "name", flat=True
-            )
-        )
-
-        # Fallback to 'RECUSADA' if nothing found (defensive)
-        EXCLUDED_PHASES = existing_excluded or {"RECUSADA"}
+        # Cancelamento preserva caixa (item #12): we INTENTIONALLY do NOT exclude
+        # RECUSADA orders here — the money was collected and must show in Financeiro.
+        # Only the planilha's total_vendido/total_os metrics exclude RECUSADA.
 
         for order in orders:
-            if (
-                order.service_order_phase
-                and order.service_order_phase.name in EXCLUDED_PHASES
-            ):
-                continue
 
             try:
                 adv = order.advance_payment if order.advance_payment is not None else 0
@@ -5377,16 +5402,21 @@ class ServiceOrderPlanilhaAPIView(APIView):
             closed_os = {r["numero_os"] for r in rows if r.get("numero_os") and r.get("tipo") == "sinal" and r.get("fechamento") == "SIM"}
             taxa_conversao = round(len(closed_os) / len(sinal_os) * 100, 1) if sinal_os else 0
 
-            # Total vendido = sum of total_value only from sinal payments (OS creation day)
-            total_vendido = Decimal("0")
-            vendido_counted = set()
-            for r in rows:
-                os_id = r.get("numero_os")
-                if os_id and os_id not in vendido_counted and r["fase"] != "VIRTUAL" and r.get("tipo") == "sinal":
-                    tv = r.get("valor_total_venda")
-                    if tv and isinstance(tv, (int, float)):
-                        total_vendido += Decimal(str(tv))
-                    vendido_counted.add(os_id)
+            # Total vendido — aligned with Dashboard (item #9):
+            # Sum total_value for confirmed (non-refused) non-virtual OS whose
+            # order_date falls in the filter range. This is independent of the
+            # payment-centric row list above, and matches Dashboard._calculate_kpis.
+            vendido_qs = ServiceOrder.objects.filter(
+                is_virtual=False,
+                service_order_phase__name__in=list(self.CONFIRMED_PHASES),
+            )
+            if start_date:
+                vendido_qs = vendido_qs.filter(order_date__gte=start_date)
+            if end_date:
+                vendido_qs = vendido_qs.filter(order_date__lte=end_date)
+            total_vendido = vendido_qs.aggregate(
+                s=models.Sum("total_value")
+            )["s"] or Decimal("0")
 
             totals = {
                 "total_os": total_os_count,

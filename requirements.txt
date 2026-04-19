@@ -9,3 +9,7 @@ python-dotenv==1.0.0
 gunicorn==21.2.0
 qrcode==7.4.2
 openpyxl==3.1.2
+
+# Dev/test
+pytest==8.3.3
+pytest-django==4.12.0
