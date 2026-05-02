@@ -54,6 +54,51 @@ from .serializers import (
 from django.core.paginator import Paginator, EmptyPage
 
 
+def _build_payment_entry(amount, forma_pagamento, tipo, data=None, motivo=None):
+    """Build a payment_details entry with a stable UUID id and normalized timestamp.
+
+    `data` accepts date, datetime, or ISO-format string; None defaults to now.
+    Date-only inputs are anchored at 12:00 UTC so the day is unambiguous in any timezone.
+    """
+    if data is None:
+        ts = timezone.now().isoformat()
+    elif isinstance(data, str):
+        ts = data
+    elif hasattr(data, "isoformat"):
+        if hasattr(data, "hour"):
+            ts = data.isoformat()
+        else:
+            ts = f"{data.isoformat()}T12:00:00+00:00"
+    else:
+        ts = str(data)
+    entry = {
+        "id": str(uuid.uuid4()),
+        "amount": float(amount),
+        "forma_pagamento": forma_pagamento,
+        "tipo": tipo,
+        "data": ts,
+    }
+    if motivo:
+        entry["motivo"] = motivo
+    return entry
+
+
+def _recompute_advance_payment(payment_details):
+    """Return the net advance_payment from payment_details, treating estorno as negative."""
+    if not isinstance(payment_details, list):
+        return Decimal("0")
+    total = Decimal("0")
+    for entry in payment_details:
+        if not isinstance(entry, dict):
+            continue
+        amt = Decimal(str(entry.get("amount", 0) or 0))
+        if entry.get("tipo") == "estorno":
+            total -= abs(amt)
+        else:
+            total += amt
+    return total
+
+
 @extend_schema(
     tags=["service-orders"],
     summary="Criar ordem de serviço",
@@ -423,7 +468,6 @@ class ServiceOrderUpdateAPIView(APIView):
                             if "pagamentos" in sinal_data and sinal_data["pagamentos"]:
                                 formas = []
                                 new_sinal_entries = []
-                                data_sinal = timezone.now().isoformat()
                                 for pag in sinal_data["pagamentos"]:
                                     forma = pag.get("forma_pagamento")
                                     amount = pag.get("amount", 0)
@@ -437,12 +481,9 @@ class ServiceOrderUpdateAPIView(APIView):
                                     if forma and amount_float > 0:
                                         if forma not in formas:
                                             formas.append(forma)
-                                        new_sinal_entries.append({
-                                            "amount": amount_float,
-                                            "forma_pagamento": forma,
-                                            "tipo": "sinal",
-                                            "data": data_sinal
-                                        })
+                                        new_sinal_entries.append(_build_payment_entry(
+                                            amount_float, forma, "sinal", data=pag.get("data"),
+                                        ))
                                 if formas:
                                     service_order.payment_method = ", ".join(formas)
                                 if new_sinal_entries:
@@ -876,19 +917,15 @@ class ServiceOrderUpdateAPIView(APIView):
                     if sinal.get("pagamentos"):
                         formas = []
                         new_entries = []
-                        data_sinal = timezone.now().isoformat()
                         for pag in sinal["pagamentos"]:
                             forma = pag.get("forma_pagamento")
                             amount = pag.get("amount", 0)
                             if forma and amount:
                                 if forma not in formas:
                                     formas.append(forma)
-                                new_entries.append({
-                                    "amount": float(amount),
-                                    "forma_pagamento": forma,
-                                    "tipo": "sinal",
-                                    "data": data_sinal,
-                                })
+                                new_entries.append(_build_payment_entry(
+                                    float(amount), forma, "sinal", data=pag.get("data"),
+                                ))
                         if formas:
                             service_order.payment_method = ", ".join(formas)
                         if new_entries:
@@ -1763,12 +1800,12 @@ class ServiceOrderMarkRetrievedAPIView(APIView):
                 current_details = service_order.payment_details or []
                 formas_pagamento = []
                 for item in payment_forms:
-                    current_details.append({
-                        "amount": float(item["amount"]),
-                        "forma_pagamento": item["forma_pagamento"],
-                        "tipo": "restante",
-                        "data": timezone.now().isoformat()
-                    })
+                    current_details.append(_build_payment_entry(
+                        float(item["amount"]),
+                        item["forma_pagamento"],
+                        "restante",
+                        data=item.get("data"),
+                    ))
                     if item["forma_pagamento"] not in formas_pagamento:
                         formas_pagamento.append(item["forma_pagamento"])
 
@@ -4250,14 +4287,9 @@ class VirtualServiceOrderCreateAPIView(APIView):
             if data.get("sinal"):
                 sinal = data["sinal"]
                 sinal_amount = Decimal(str(sinal["amount"]))
-                sinal_data_str = timezone.now().isoformat()
-
-                payment_details.append({
-                    "amount": float(sinal_amount),
-                    "forma_pagamento": sinal["forma_pagamento"],
-                    "tipo": "sinal",
-                    "data": sinal_data_str
-                })
+                payment_details.append(_build_payment_entry(
+                    float(sinal_amount), sinal["forma_pagamento"], "sinal", data=sinal.get("data"),
+                ))
                 advance_payment += sinal_amount
                 if sinal["forma_pagamento"] not in payment_methods:
                     payment_methods.append(sinal["forma_pagamento"])
@@ -4265,14 +4297,9 @@ class VirtualServiceOrderCreateAPIView(APIView):
             if data.get("restante"):
                 restante = data["restante"]
                 restante_amount = Decimal(str(restante["amount"]))
-                restante_data_str = timezone.now().isoformat()
-
-                payment_details.append({
-                    "amount": float(restante_amount),
-                    "forma_pagamento": restante["forma_pagamento"],
-                    "tipo": "restante",
-                    "data": restante_data_str
-                })
+                payment_details.append(_build_payment_entry(
+                    float(restante_amount), restante["forma_pagamento"], "restante", data=restante.get("data"),
+                ))
                 advance_payment += restante_amount
                 if restante["forma_pagamento"] not in payment_methods:
                     payment_methods.append(restante["forma_pagamento"])
@@ -4280,14 +4307,9 @@ class VirtualServiceOrderCreateAPIView(APIView):
             if data.get("indenizacao"):
                 indenizacao = data["indenizacao"]
                 indenizacao_amount = Decimal(str(indenizacao["amount"]))
-                indenizacao_data_str = timezone.now().isoformat()
-
-                payment_details.append({
-                    "amount": float(indenizacao_amount),
-                    "forma_pagamento": indenizacao["forma_pagamento"],
-                    "tipo": "indenizacao",
-                    "data": indenizacao_data_str
-                })
+                payment_details.append(_build_payment_entry(
+                    float(indenizacao_amount), indenizacao["forma_pagamento"], "indenizacao", data=indenizacao.get("data"),
+                ))
                 advance_payment += indenizacao_amount
                 if indenizacao["forma_pagamento"] not in payment_methods:
                     payment_methods.append(indenizacao["forma_pagamento"])
@@ -4298,12 +4320,9 @@ class VirtualServiceOrderCreateAPIView(APIView):
                 # so finance aggregations show negative value (item #5).
                 estorno = data["estorno"]
                 estorno_amount = Decimal(str(estorno["amount"]))
-                payment_details.append({
-                    "amount": float(estorno_amount),
-                    "forma_pagamento": estorno["forma_pagamento"],
-                    "tipo": "estorno",
-                    "data": timezone.now().isoformat(),
-                })
+                payment_details.append(_build_payment_entry(
+                    float(estorno_amount), estorno["forma_pagamento"], "estorno", data=estorno.get("data"),
+                ))
                 advance_payment -= estorno_amount
                 if estorno["forma_pagamento"] not in payment_methods:
                     payment_methods.append(estorno["forma_pagamento"])
@@ -4510,6 +4529,7 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
                             effective_amt = -abs(amt) if tipo == "estorno" else amt
                             transactions.append({
                                 "order_id": order.id,
+                                "entry_id": pag.get("id"),
                                 "transaction_type": tipo,
                                 "amount": effective_amt,
                                 "payment_method": pm,
@@ -4656,6 +4676,7 @@ class ServiceOrderRefundAPIView(APIView):
             amount = request.data.get("amount")
             forma_pagamento = request.data.get("forma_pagamento", "")
             motivo = request.data.get("motivo", "")
+            data_pagamento = request.data.get("data")
 
             if not amount or Decimal(str(amount)) <= 0:
                 return Response(
@@ -4666,15 +4687,13 @@ class ServiceOrderRefundAPIView(APIView):
             refund_amount = Decimal(str(amount))
 
             current_details = service_order.payment_details or []
-            current_details.append(
-                {
-                    "amount": float(refund_amount),
-                    "forma_pagamento": forma_pagamento,
-                    "tipo": "estorno",
-                    "data": timezone.now().isoformat(),
-                    "motivo": motivo,
-                }
-            )
+            current_details.append(_build_payment_entry(
+                float(refund_amount),
+                forma_pagamento,
+                "estorno",
+                data=data_pagamento,
+                motivo=motivo,
+            ))
             service_order.payment_details = current_details
             service_order.advance_payment = (
                 service_order.advance_payment or Decimal("0")
@@ -4721,6 +4740,7 @@ class ServiceOrderAddPaymentAPIView(APIView):
             for pag in payments:
                 amount = pag.get("amount")
                 forma = pag.get("forma_pagamento", "")
+                data_pagamento = pag.get("data")
 
                 if not amount or Decimal(str(amount)) <= 0:
                     return Response(
@@ -4731,14 +4751,12 @@ class ServiceOrderAddPaymentAPIView(APIView):
                 pag_amount = Decimal(str(amount))
                 total_added += pag_amount
 
-                current_details.append(
-                    {
-                        "amount": float(pag_amount),
-                        "forma_pagamento": forma,
-                        "tipo": "parcial",
-                        "data": timezone.now().isoformat(),
-                    }
-                )
+                current_details.append(_build_payment_entry(
+                    float(pag_amount),
+                    forma,
+                    "parcial",
+                    data=data_pagamento,
+                ))
                 if forma and forma not in formas:
                     formas.append(forma)
 
@@ -4773,6 +4791,115 @@ class ServiceOrderAddPaymentAPIView(APIView):
                 {"error": f"Erro ao adicionar pagamento: {str(e)}"},
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
+
+
+class ServiceOrderPaymentEntryAPIView(APIView):
+    """Edit or remove a single entry in payment_details (admin only).
+
+    payment_details has no FK relation; entries are addressed by the stable
+    UUID injected via _build_payment_entry / migration 0033. After any change
+    advance_payment is recomputed from the surviving entries so the OS totals
+    can never drift away from the underlying ledger.
+    """
+
+    permission_classes = [IsAuthenticated]
+
+    def _require_admin(self, request):
+        person = getattr(request.user, "person", None)
+        is_admin = person and person.person_type and person.person_type.type == "ADMINISTRADOR"
+        if not is_admin:
+            return Response(
+                {"error": "Apenas administradores podem editar pagamentos."},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        return None
+
+    def _find_entry(self, service_order, entry_id):
+        details = service_order.payment_details or []
+        for idx, entry in enumerate(details):
+            if isinstance(entry, dict) and str(entry.get("id")) == str(entry_id):
+                return idx, entry, details
+        return None, None, details
+
+    def _persist(self, service_order, details):
+        service_order.payment_details = details
+        service_order.advance_payment = _recompute_advance_payment(details)
+        formas = []
+        for entry in details:
+            forma = entry.get("forma_pagamento")
+            if forma and forma not in formas:
+                formas.append(forma)
+        service_order.payment_method = ", ".join(formas) if formas else None
+        service_order.save()
+
+    def patch(self, request, order_id, entry_id):
+        block = self._require_admin(request)
+        if block:
+            return block
+        service_order = get_object_or_404(ServiceOrder, id=order_id)
+        idx, entry, details = self._find_entry(service_order, entry_id)
+        if entry is None:
+            return Response(
+                {"error": "Pagamento não encontrado."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if "amount" in request.data:
+            try:
+                amt = Decimal(str(request.data["amount"]))
+            except Exception:
+                return Response(
+                    {"error": "Valor inválido."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            if amt <= 0:
+                return Response(
+                    {"error": "Valor deve ser maior que zero."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+            entry["amount"] = float(amt)
+        if "forma_pagamento" in request.data:
+            entry["forma_pagamento"] = request.data["forma_pagamento"]
+        if "tipo" in request.data:
+            entry["tipo"] = request.data["tipo"]
+        if "data" in request.data:
+            new_data = request.data["data"]
+            normalized = _build_payment_entry(0, "", "tmp", data=new_data)["data"]
+            entry["data"] = normalized
+        if "motivo" in request.data:
+            entry["motivo"] = request.data["motivo"]
+
+        details[idx] = entry
+        self._persist(service_order, details)
+
+        return Response({
+            "success": True,
+            "message": "Pagamento atualizado com sucesso",
+            "entry": entry,
+            "new_advance_payment": float(service_order.advance_payment),
+            "new_remaining_payment": float(service_order.remaining_payment),
+        })
+
+    def delete(self, request, order_id, entry_id):
+        block = self._require_admin(request)
+        if block:
+            return block
+        service_order = get_object_or_404(ServiceOrder, id=order_id)
+        idx, entry, details = self._find_entry(service_order, entry_id)
+        if entry is None:
+            return Response(
+                {"error": "Pagamento não encontrado."},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+        removed = details.pop(idx)
+        self._persist(service_order, details)
+        return Response({
+            "success": True,
+            "message": "Pagamento removido com sucesso",
+            "removed": removed,
+            "new_advance_payment": float(service_order.advance_payment),
+            "new_remaining_payment": float(service_order.remaining_payment),
+        })
 
 
 class ServiceOrderChangePhaseAPIView(APIView):
