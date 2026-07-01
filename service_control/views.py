@@ -34,6 +34,15 @@ def advance_service_order_phases():
 
     today = date.today()
 
+    # Fases-alvo buscadas UMA vez (evita um SELECT por OS dentro do loop).
+    overdue_phase = ServiceOrderPhase.objects.filter(name="EM ATRASO").first()
+    in_progress_phase = ServiceOrderPhase.objects.filter(name="EM ANDAMENTO").first()
+
+    # Se nenhuma fase-alvo existe, nenhuma OS pode avançar. Retorna cedo para
+    # não varrer a tabela inteira a cada request (esta função roda no dashboard).
+    if overdue_phase is None and in_progress_phase is None:
+        return
+
     # Busca todas as OS que precisam de avanço de fase
     service_orders = ServiceOrder.objects.filter(
         service_order_phase__name__in=["PENDENTE", "EM ANDAMENTO", "FINALIZADO"]
@@ -43,14 +52,10 @@ def advance_service_order_phases():
         # Lógica de avanço baseada em datas
         if os.devolucao_date and os.devolucao_date < today:
             # OS em atraso - mudar para "EM ATRASO"
-            try:
-                overdue_phase = ServiceOrderPhase.objects.get(name="EM ATRASO")
-                if os.service_order_phase != overdue_phase:
-                    os.service_order_phase = overdue_phase
-                    os.save()
-                    print(f"OS {os.id} marcada como EM ATRASO")
-            except ServiceOrderPhase.DoesNotExist:
-                pass
+            if overdue_phase is not None and os.service_order_phase != overdue_phase:
+                os.service_order_phase = overdue_phase
+                os.save()
+                print(f"OS {os.id} marcada como EM ATRASO")
 
         elif (
             os.retirada_date
@@ -58,13 +63,10 @@ def advance_service_order_phases():
             and os.service_order_phase.name == "FINALIZADO"
         ):
             # OS finalizada e data de retirada chegou - mudar para "EM ANDAMENTO"
-            try:
-                in_progress_phase = ServiceOrderPhase.objects.get(name="EM ANDAMENTO")
+            if in_progress_phase is not None:
                 os.service_order_phase = in_progress_phase
                 os.save()
                 print(f"OS {os.id} avançada para EM ANDAMENTO")
-            except ServiceOrderPhase.DoesNotExist:
-                pass
 
 
 # Todas as funcionalidades agora estão disponíveis via API REST:
