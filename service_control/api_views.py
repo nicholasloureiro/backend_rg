@@ -99,6 +99,75 @@ def _recompute_advance_payment(payment_details):
     return total
 
 
+def _empty_order_client_data(order):
+    """Dados do cliente para OS sem renter (cliente excluído ou só com client_name)."""
+    return {
+        "id": None,
+        "name": order.client_name or "",
+        "cpf": None,
+        "person_type": None,
+        "contacts": [],
+        "addresses": [],
+    }
+
+
+def _build_order_client_data(order):
+    """Dados do cliente (último contato e endereço) usados nas listagens por fase."""
+    renter = order.renter
+    if renter is None:
+        return _empty_order_client_data(order)
+
+    client_data = {
+        "id": renter.id,
+        "name": renter.name,
+        "cpf": renter.cpf,
+        "person_type": (
+            {
+                "id": renter.person_type.id,
+                "type": renter.person_type.type,
+            }
+            if renter.person_type
+            else None
+        ),
+    }
+
+    contact = renter.contacts.order_by("-date_created", "-id").first()
+    client_data["contacts"] = []
+    if contact:
+        client_data["contacts"].append(
+            {
+                "id": contact.id,
+                "email": contact.email,
+                "phone": contact.phone,
+            }
+        )
+
+    address = renter.personsadresses_set.order_by("-date_created", "-id").first()
+    client_data["addresses"] = []
+    if address:
+        city_data = None
+        if address.city:
+            city_data = {
+                "id": address.city.id,
+                "name": address.city.name,
+                "uf": address.city.uf,
+            }
+
+        client_data["addresses"].append(
+            {
+                "id": address.id,
+                "cep": address.cep,
+                "rua": address.street,
+                "numero": address.number,
+                "bairro": address.neighborhood,
+                "complemento": address.complemento or "",
+                "cidade": city_data,
+            }
+        )
+
+    return client_data
+
+
 @extend_schema(
     tags=["service-orders"],
     summary="Criar ordem de serviço",
@@ -1144,70 +1213,73 @@ class ServiceOrderDetailAPIView(APIView):
             )
 
             # Dados do cliente
-            client_data = {
-                "id": order.renter.id,
-                "name": order.renter.name,
-                "cpf": order.renter.cpf,
-                "person_type": (
-                    {
-                        "id": order.renter.person_type.id,
-                        "type": order.renter.person_type.type,
-                    }
-                    if order.renter.person_type
-                    else None
-                ),
-            }
+            if order.renter is None:
+                client_data = _empty_order_client_data(order)
+            else:
+                client_data = {
+                    "id": order.renter.id,
+                    "name": order.renter.name,
+                    "cpf": order.renter.cpf,
+                    "person_type": (
+                        {
+                            "id": order.renter.person_type.id,
+                            "type": order.renter.person_type.type,
+                        }
+                        if order.renter.person_type
+                        else None
+                    ),
+                }
 
-            # Contatos do cliente (apenas o mais recente)
-            contact = (
-                order.renter.contacts.filter(date_created__isnull=False)
-                .order_by("-date_created", "-id")
-                .first()
-            )
-            if not contact:
-                # Se não houver contato com date_created, buscar o mais recente por ID
-                contact = order.renter.contacts.order_by("-id").first()
-
-            client_data["contacts"] = []
-            if contact:
-                client_data["contacts"].append(
-                    {
-                        "id": contact.id,
-                        "email": contact.email,
-                        "phone": contact.phone,
-                    }
+                # Contatos do cliente (apenas o mais recente)
+                contact = (
+                    order.renter.contacts.filter(date_created__isnull=False)
+                    .order_by("-date_created", "-id")
+                    .first()
                 )
+                if not contact:
+                    # Se não houver contato com date_created, buscar o mais recente por ID
+                    contact = order.renter.contacts.order_by("-id").first()
 
-            # Endereços do cliente (apenas o mais recente)
-            address = (
-                order.renter.personsadresses_set.filter(date_created__isnull=False)
-                .order_by("-date_created", "-id")
-                .first()
-            )
-            if not address:
-                # Se não houver endereço com date_created, buscar o mais recente por ID
-                address = order.renter.personsadresses_set.order_by("-id").first()
-            client_data["addresses"] = []
-            if address:
-                city_data = None
-                if address.city:
-                    city_data = {
-                        "id": address.city.id,
-                        "name": address.city.name,
-                        "uf": address.city.uf,
-                    }
+                client_data["contacts"] = []
+                if contact:
+                    client_data["contacts"].append(
+                        {
+                            "id": contact.id,
+                            "email": contact.email,
+                            "phone": contact.phone,
+                        }
+                    )
 
-                client_data["addresses"].append(
-                    {
-                        "id": address.id,
-                        "cep": address.cep,
-                        "rua": address.street,
-                        "numero": address.number,
-                        "bairro": address.neighborhood,
-                        "complemento": address.complemento or "",
-                        "cidade": city_data,
-                    }
+                # Endereços do cliente (apenas o mais recente)
+                address = (
+                    order.renter.personsadresses_set.filter(date_created__isnull=False)
+                    .order_by("-date_created", "-id")
+                    .first()
                 )
+                if not address:
+                    # Se não houver endereço com date_created, buscar o mais recente por ID
+                    address = order.renter.personsadresses_set.order_by("-id").first()
+                client_data["addresses"] = []
+                if address:
+                    city_data = None
+                    if address.city:
+                        city_data = {
+                            "id": address.city.id,
+                            "name": address.city.name,
+                            "uf": address.city.uf,
+                        }
+
+                    client_data["addresses"].append(
+                        {
+                            "id": address.id,
+                            "cep": address.cep,
+                            "rua": address.street,
+                            "numero": address.number,
+                            "bairro": address.neighborhood,
+                            "complemento": address.complemento or "",
+                            "cidade": city_data,
+                        }
+                    )
 
             # Dados da OS
             order_data = {
@@ -3222,57 +3294,7 @@ class ServiceOrderListByPhaseAPIView(APIView):
             data = []
             for order in orders:
                 # Dados do cliente
-                client_data = {
-                    "id": order.renter.id,
-                    "name": order.renter.name,
-                    "cpf": order.renter.cpf,
-                    "person_type": (
-                        {
-                            "id": order.renter.person_type.id,
-                            "type": order.renter.person_type.type,
-                        }
-                        if order.renter.person_type
-                        else None
-                    ),
-                }
-
-                # Contatos do cliente (apenas o mais recente)
-                contact = order.renter.contacts.order_by("-date_created", "-id").first()
-                client_data["contacts"] = []
-                if contact:
-                    client_data["contacts"].append(
-                        {
-                            "id": contact.id,
-                            "email": contact.email,
-                            "phone": contact.phone,
-                        }
-                    )
-
-                # Endereços do cliente (apenas o mais recente)
-                address = order.renter.personsadresses_set.order_by(
-                    "-date_created", "-id"
-                ).first()
-                client_data["addresses"] = []
-                if address:
-                    city_data = None
-                    if address.city:
-                        city_data = {
-                            "id": address.city.id,
-                            "name": address.city.name,
-                            "uf": address.city.uf,
-                        }
-
-                    client_data["addresses"].append(
-                        {
-                            "id": address.id,
-                            "cep": address.cep,
-                            "rua": address.street,
-                            "numero": address.number,
-                            "bairro": address.neighborhood,
-                            "complemento": address.complemento or "",
-                            "cidade": city_data,
-                        }
-                    )
+                client_data = _build_order_client_data(order)
 
                 # Dados da OS
                 order_data = {
@@ -3881,55 +3903,7 @@ class ServiceOrderListByPhaseV2APIView(APIView):
             results = []
             for order in page_obj.object_list:
                 # Reaproveitar construção do payload igual ao V1
-                client_data = {
-                    "id": order.renter.id,
-                    "name": order.renter.name,
-                    "cpf": order.renter.cpf,
-                    "person_type": (
-                        {
-                            "id": order.renter.person_type.id,
-                            "type": order.renter.person_type.type,
-                        }
-                        if order.renter.person_type
-                        else None
-                    ),
-                }
-
-                contact = order.renter.contacts.order_by("-date_created", "-id").first()
-                client_data["contacts"] = []
-                if contact:
-                    client_data["contacts"].append(
-                        {
-                            "id": contact.id,
-                            "email": contact.email,
-                            "phone": contact.phone,
-                        }
-                    )
-
-                address = order.renter.personsadresses_set.order_by(
-                    "-date_created", "-id"
-                ).first()
-                client_data["addresses"] = []
-                if address:
-                    city_data = None
-                    if address.city:
-                        city_data = {
-                            "id": address.city.id,
-                            "name": address.city.name,
-                            "uf": address.city.uf,
-                        }
-
-                    client_data["addresses"].append(
-                        {
-                            "id": address.id,
-                            "cep": address.cep,
-                            "rua": address.street,
-                            "numero": address.number,
-                            "bairro": address.neighborhood,
-                            "complemento": address.complemento or "",
-                            "cidade": city_data,
-                        }
-                    )
+                client_data = _build_order_client_data(order)
 
                 order_data = {
                     "id": order.id,
