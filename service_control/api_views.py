@@ -10,6 +10,7 @@ from decimal import Decimal
 logger = logging.getLogger(__name__)
 
 from django.db import models, transaction
+from django.db.models.functions import Coalesce
 from django.shortcuts import get_object_or_404
 from django.utils import timezone
 from drf_spectacular.types import OpenApiTypes
@@ -99,6 +100,85 @@ def _recompute_advance_payment(payment_details):
     return total
 
 
+# Fases das abas de /ordens; ATRASADO é derivada de AGUARDANDO_DEVOLUCAO.
+ORDER_TAB_PHASES = [
+    "PENDENTE",
+    "EM_PRODUCAO",
+    "AGUARDANDO_RETIRADA",
+    "AGUARDANDO_DEVOLUCAO",
+    "ATRASADO",
+    "RECUSADA",
+    "FINALIZADO",
+]
+MAX_PHASE_PAGE_SIZE = 200
+
+
+def _recalculated_remaining_payment():
+    """Mesmo cálculo de ServiceOrder.save(), para update() não deixar o valor defasado."""
+    return Coalesce(
+        models.F("total_value") - models.F("advance_payment"),
+        models.F("remaining_payment"),
+    )
+
+
+def _refuse_orders_with_past_event(today):
+    """Recusa OS PENDENTE/EM_PRODUCAO não retiradas cujo evento já passou."""
+    refused_phase = ServiceOrderPhase.objects.filter(name="RECUSADA").first()
+    if not refused_phase:
+        return
+
+    ServiceOrder.objects.filter(
+        event__event_date__lt=today,
+        data_retirado__isnull=True,
+        service_order_phase__name__in=["PENDENTE", "EM_PRODUCAO"],
+    ).update(
+        service_order_phase=refused_phase,
+        justification_refusal="Cliente não retirou o produto",
+        data_recusa=today,
+        remaining_payment=_recalculated_remaining_payment(),
+    )
+
+
+def _sync_awaiting_pickup_late_flag(phase, today):
+    """Atualiza esta_atrasada de AGUARDANDO_RETIRADA só nas OS em que o valor muda."""
+    late = models.Q(retirada_date__lt=today) | models.Q(
+        event__event_date__lt=today, data_retirado__isnull=True
+    )
+    orders = ServiceOrder.objects.filter(is_virtual=False, service_order_phase=phase)
+    late_ids = orders.filter(late).values("id")
+    orders.filter(id__in=late_ids, esta_atrasada=False).update(
+        esta_atrasada=True, remaining_payment=_recalculated_remaining_payment()
+    )
+    orders.filter(esta_atrasada=True).exclude(id__in=late_ids).update(
+        esta_atrasada=False, remaining_payment=_recalculated_remaining_payment()
+    )
+
+
+def _orders_for_phase_tab(phase, today):
+    """OS não virtuais de uma aba: lista e contagem usam o mesmo filtro."""
+    orders = ServiceOrder.objects.filter(is_virtual=False)
+    if phase.name != "ATRASADO":
+        return orders.filter(service_order_phase=phase)
+
+    # Apenas ordens atrasadas na DEVOLUÇÃO (roupas não devolvidas)
+    awaiting_return = ServiceOrderPhase.objects.filter(
+        name="AGUARDANDO_DEVOLUCAO"
+    ).first()
+    return orders.filter(
+        models.Q(
+            service_order_phase=awaiting_return,
+            devolucao_date__lt=today,
+            data_devolvido__isnull=True,
+        )
+        | models.Q(
+            service_order_phase=awaiting_return,
+            data_devolvido__isnull=True,
+            event__event_date__lt=today,
+            event__isnull=False,
+        )
+    ).distinct()
+
+
 def _empty_order_client_data(order):
     """Dados do cliente para OS sem renter (cliente excluído ou só com client_name)."""
     return {
@@ -109,6 +189,14 @@ def _empty_order_client_data(order):
         "contacts": [],
         "addresses": [],
     }
+
+
+def _latest_related(renter, prefetched_attr, manager):
+    """Último registro relacionado, do prefetch quando houver; senão, por query."""
+    prefetched = getattr(renter, prefetched_attr, None)
+    if prefetched is not None:
+        return prefetched[0] if prefetched else None
+    return manager.order_by("-date_created", "-id").first()
 
 
 def _build_order_client_data(order):
@@ -131,7 +219,7 @@ def _build_order_client_data(order):
         ),
     }
 
-    contact = renter.contacts.order_by("-date_created", "-id").first()
+    contact = _latest_related(renter, "recent_contacts", renter.contacts)
     client_data["contacts"] = []
     if contact:
         client_data["contacts"].append(
@@ -142,7 +230,7 @@ def _build_order_client_data(order):
             }
         )
 
-    address = renter.personsadresses_set.order_by("-date_created", "-id").first()
+    address = _latest_related(renter, "recent_addresses", renter.personsadresses_set)
     client_data["addresses"] = []
     if address:
         city_data = None
@@ -3127,36 +3215,7 @@ class ServiceOrderListByPhaseAPIView(APIView):
         try:
             today = date.today()
 
-            # Função para mover automaticamente para RECUSADA quem passou da data do evento
-            def move_to_refused_if_event_passed():
-                refused_phase = ServiceOrderPhase.objects.filter(
-                    name="RECUSADA"
-                ).first()
-                if not refused_phase:
-                    return
-
-                # Buscar OS que passaram da data do evento e não foram retiradas
-                # Apenas recusar PENDENTE e EM_PRODUCAO — ordens já retiradas ou finalizadas não devem ser auto-recusadas
-                overdue_orders = ServiceOrder.objects.filter(
-                    event__event_date__lt=today,
-                    data_retirado__isnull=True,
-                    service_order_phase__name__in=[
-                        "PENDENTE",
-                        "EM_PRODUCAO",
-                    ],
-                    event__isnull=False,
-                ).exclude(service_order_phase__name="RECUSADA")
-
-                for order in overdue_orders:
-                    order.service_order_phase = refused_phase
-                    order.justification_refusal = "Cliente não retirou o produto"
-                    order.save()
-                    print(
-                        f"OS {order.id} movida automaticamente para RECUSADA - Cliente não retirou o produto"
-                    )
-
-            # Executar verificação automática
-            move_to_refused_if_event_passed()
+            _refuse_orders_with_past_event(today)
 
             phase = ServiceOrderPhase.objects.filter(name__icontains=phase_name).first()
             if not phase:
@@ -3554,6 +3613,35 @@ class ServiceOrderListByPhaseAPIView(APIView):
 
 @extend_schema(
     tags=["service-orders"],
+    summary="Contagem de OS por aba",
+    description="Retorna a quantidade de OS de cada aba da tela de ordens, com o mesmo filtro da listagem V2.",
+    responses={200: OpenApiTypes.OBJECT},
+)
+class ServiceOrderPhaseCountsAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request):
+        today = date.today()
+        _refuse_orders_with_past_event(today)
+
+        phases = {
+            phase.name: phase
+            for phase in ServiceOrderPhase.objects.filter(name__in=ORDER_TAB_PHASES)
+        }
+        return Response(
+            {
+                name: (
+                    _orders_for_phase_tab(phases[name], today).count()
+                    if name in phases
+                    else 0
+                )
+                for name in ORDER_TAB_PHASES
+            }
+        )
+
+
+@extend_schema(
+    tags=["service-orders"],
     summary="Listar ordens de serviço por fase (V2, paginado)",
     description=(
         "Retorna ordens de serviço filtradas por fase com paginação simples. "
@@ -3689,33 +3777,11 @@ class ServiceOrderListByPhaseV2APIView(APIView):
 
             if page_size <= 0:
                 page_size = 20
+            page_size = min(page_size, MAX_PHASE_PAGE_SIZE)
 
             today = date.today()
 
-            # Reaplicar a mesma lógica automática de recusa por evento passado
-            def move_to_refused_if_event_passed():
-                refused_phase = ServiceOrderPhase.objects.filter(
-                    name="RECUSADA"
-                ).first()
-                if not refused_phase:
-                    return
-
-                overdue_orders = ServiceOrder.objects.filter(
-                    event__event_date__lt=today,
-                    data_retirado__isnull=True,
-                    service_order_phase__name__in=[
-                        "PENDENTE",
-                        "EM_PRODUCAO",
-                    ],
-                    event__isnull=False,
-                ).exclude(service_order_phase__name="RECUSADA")
-
-                for order in overdue_orders:
-                    order.service_order_phase = refused_phase
-                    order.justification_refusal = "Cliente não retirou o produto"
-                    order.save()
-
-            move_to_refused_if_event_passed()
+            _refuse_orders_with_past_event(today)
 
             phase = ServiceOrderPhase.objects.filter(name__icontains=phase_name).first()
             if not phase:
@@ -3723,97 +3789,36 @@ class ServiceOrderListByPhaseV2APIView(APIView):
                     {"error": "Fase não encontrada"}, status=status.HTTP_404_NOT_FOUND
                 )
 
-            # Base queryset - exclui OSs virtuais
-            base_qs = ServiceOrder.objects.filter(is_virtual=False)
+            if phase.name == "AGUARDANDO_RETIRADA":
+                _sync_awaiting_pickup_late_flag(phase, today)
 
-            # Filtrar orders baseado na fase (mesma lógica que V1)
-            if phase.name == "ATRASADO":
-                aguardando_devolucao_phase = ServiceOrderPhase.objects.filter(
-                    name="AGUARDANDO_DEVOLUCAO"
-                ).first()
-
-                # Apenas ordens atrasadas na DEVOLUÇÃO (roupas não devolvidas)
-                q_devolucao_atrasada = models.Q(
-                    service_order_phase=aguardando_devolucao_phase,
-                    devolucao_date__lt=today,
-                    data_devolvido__isnull=True,
+            orders_qs = (
+                _orders_for_phase_tab(phase, today)
+                .select_related(
+                    "renter",
+                    "employee",
+                    "attendant",
+                    "renter__person_type",
+                    "event",
+                    "justification_reason",
                 )
-                q_evento_passado_devolucao = models.Q(
-                    service_order_phase=aguardando_devolucao_phase,
-                    data_devolvido__isnull=True,
-                    event__event_date__lt=today,
-                    event__isnull=False,
+                .prefetch_related(
+                    "items__temporary_product",
+                    "items__product",
+                    models.Prefetch(
+                        "renter__contacts",
+                        queryset=PersonsContacts.objects.order_by("-date_created", "-id"),
+                        to_attr="recent_contacts",
+                    ),
+                    models.Prefetch(
+                        "renter__personsadresses_set",
+                        queryset=PersonsAdresses.objects.select_related("city").order_by(
+                            "-date_created", "-id"
+                        ),
+                        to_attr="recent_addresses",
+                    ),
                 )
-
-                orders_qs = (
-                    base_qs.filter(
-                        q_devolucao_atrasada | q_evento_passado_devolucao
-                    )
-                    .distinct()
-                    .select_related(
-                        "renter",
-                        "employee",
-                        "attendant",
-                        "renter__person_type",
-                        "event",
-                        "justification_reason",
-                    )
-                    .prefetch_related("items__temporary_product", "items__product")
-                )
-
-            elif phase.name in [
-                "AGUARDANDO_DEVOLUCAO",
-                "EM_PRODUCAO",
-                "AGUARDANDO_RETIRADA",
-            ]:
-                orders_qs = (
-                    base_qs.filter(
-                        service_order_phase=phase,
-                    )
-                    .select_related(
-                        "renter",
-                        "employee",
-                        "attendant",
-                        "renter__person_type",
-                        "event",
-                        "justification_reason",
-                    )
-                    .prefetch_related("items__temporary_product", "items__product")
-                )
-
-                # Para AGUARDANDO_RETIRADA atualizar flag de atraso globalmente
-                if phase.name == "AGUARDANDO_RETIRADA":
-                    for order in orders_qs:
-                        esta_atrasada = False
-
-                        if order.retirada_date and order.retirada_date < today:
-                            esta_atrasada = True
-
-                        if (
-                            order.event
-                            and order.event.event_date
-                            and order.event.event_date < today
-                            and not order.data_retirado
-                        ):
-                            esta_atrasada = True
-
-                        if order.esta_atrasada != esta_atrasada:
-                            order.esta_atrasada = esta_atrasada
-                            order.save()
-
-            else:
-                orders_qs = (
-                    base_qs.filter(service_order_phase=phase)
-                    .select_related(
-                        "renter",
-                        "employee",
-                        "attendant",
-                        "renter__person_type",
-                        "event",
-                        "justification_reason",
-                    )
-                    .prefetch_related("items__temporary_product", "items__product")
-                )
+            )
 
             # Aplicar filtros opcionais de data e pesquisa livre antes da paginação
             start_date = request.GET.get("start_date")
@@ -3888,10 +3893,12 @@ class ServiceOrderListByPhaseV2APIView(APIView):
                 if field_name in ALLOWED_ORDERING_FIELDS:
                     ordering_fields.append(field)
 
-            if ordering_fields:
-                orders_qs = orders_qs.order_by(*ordering_fields)
-            else:
-                orders_qs = orders_qs.order_by('-order_date')
+            if not ordering_fields:
+                ordering_fields = ['-order_date']
+            # Desempate por id: sem ele, OS com a mesma data trocam de página entre chamadas
+            if not any(field.lstrip('-') == 'id' for field in ordering_fields):
+                ordering_fields.append('-id')
+            orders_qs = orders_qs.order_by(*ordering_fields)
 
             # Paginação
             paginator = Paginator(orders_qs, page_size)
@@ -4405,7 +4412,30 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
         if page_size <= 0:
             page_size = 50
 
-        orders = ServiceOrder.objects.select_related("service_order_phase", "renter")
+        # Só OS que podem gerar transação, e só as colunas usadas abaixo.
+        # order_by("id") mantém estável a ordem de empates entre uma página e outra.
+        orders = (
+            ServiceOrder.objects.filter(
+                models.Q(payment_details__isnull=False)
+                | models.Q(advance_payment__gt=0)
+                | models.Q(service_order_phase__name="FINALIZADO", remaining_payment__gt=0)
+            )
+            .select_related("service_order_phase", "renter")
+            .only(
+                "advance_payment",
+                "remaining_payment",
+                "payment_details",
+                "payment_method",
+                "order_date",
+                "data_devolvido",
+                "is_virtual",
+                "client_name",
+                "observations",
+                "service_order_phase__name",
+                "renter__name",
+            )
+            .order_by("id")
+        )
 
         # Don't filter by order_date here - we'll filter individual transactions by payment date
 
@@ -4416,7 +4446,7 @@ class ServiceOrderFinanceSummaryAPIView(APIView):
         # RECUSADA orders here — the money was collected and must show in Financeiro.
         # Only the planilha's total_vendido/total_os metrics exclude RECUSADA.
 
-        for order in orders:
+        for order in orders.iterator(chunk_size=2000):
 
             try:
                 adv = order.advance_payment if order.advance_payment is not None else 0
@@ -5385,6 +5415,21 @@ class ServiceOrderPlanilhaAPIView(APIView):
                     "employee",
                     "service_order_phase",
                 )
+                .only(
+                    "is_virtual",
+                    "client_name",
+                    "order_date",
+                    "payment_details",
+                    "advance_payment",
+                    "payment_method",
+                    "total_value",
+                    "observations",
+                    "renter_role",
+                    "came_from",
+                    "renter__name",
+                    "employee__name",
+                    "service_order_phase__name",
+                )
             )
 
             # Pre-filter by OS-level fields
@@ -5959,7 +6004,7 @@ class EventListWithStatusAPIView(APIView):
                 page_size = 50
 
             # Buscar todos os eventos
-            events = Event.objects.all().order_by("-date_created")
+            events = Event.objects.all().order_by("-date_created", "-id")
 
             # Aplicar filtros opcionais
             start_date = request.GET.get("start_date")
@@ -5983,19 +6028,33 @@ class EventListWithStatusAPIView(APIView):
                     models.Q(name__icontains=search) | models.Q(description__icontains=search)
                 )
 
-            result_data = []
+            # Paginação no banco; as contagens por status vêm junto, em uma query
+            total_events = events.count()
+            total_pages = (total_events + page_size - 1) // page_size if page_size > 0 else 1
 
-            for event in events:
-                # Contar ordens de serviço vinculadas ao evento
-                service_orders = ServiceOrder.objects.filter(event=event)
-                service_orders_count = service_orders.count()
+            start_idx = (page - 1) * page_size
+            end_idx = start_idx + page_size
+            page_events = events.annotate(
+                orders_total=models.Count("service_orders"),
+                orders_finished=models.Count(
+                    "service_orders",
+                    filter=models.Q(service_orders__service_order_phase__name="FINALIZADO"),
+                ),
+                orders_in_progress=models.Count(
+                    "service_orders",
+                    filter=models.Q(
+                        service_orders__service_order_phase__name__in=[
+                            "PENDENTE",
+                            "EM_PRODUCAO",
+                            "AGUARDANDO_RETIRADA",
+                            "AGUARDANDO_DEVOLUCAO",
+                        ]
+                    ),
+                ),
+            )[start_idx:end_idx]
 
-                # Calcular status do evento
-                status_evento = self._calculate_event_status(
-                    event, service_orders, today
-                )
-
-                event_data = {
+            paginated_events = [
+                {
                     "id": event.id,
                     "name": event.name,
                     "description": event.description or "",
@@ -6004,21 +6063,13 @@ class EventListWithStatusAPIView(APIView):
                         if event.event_date and hasattr(event.event_date, "date")
                         else event.event_date
                     ),
-                    "service_orders_count": service_orders_count,
-                    "status": status_evento,
+                    "service_orders_count": event.orders_total,
+                    "status": self._calculate_event_status(event, today),
                     "date_created": event.date_created,
                     "date_updated": event.date_updated,
                 }
-
-                result_data.append(event_data)
-
-            # Aplicar paginação
-            total_events = len(result_data)
-            total_pages = (total_events + page_size - 1) // page_size if page_size > 0 else 1
-
-            start_idx = (page - 1) * page_size
-            end_idx = start_idx + page_size
-            paginated_events = result_data[start_idx:end_idx]
+                for event in page_events
+            ]
 
             summary = {
                 "count": total_events,
@@ -6036,8 +6087,8 @@ class EventListWithStatusAPIView(APIView):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR,
             )
 
-    def _calculate_event_status(self, event, service_orders, today):
-        """Calcula o status do evento baseado nas ordens de serviço"""
+    def _calculate_event_status(self, event, today):
+        """Calcula o status do evento a partir das contagens anotadas na query."""
 
         # Se não tem data do evento definida, não podemos calcular status
         if not event.event_date:
@@ -6052,31 +6103,16 @@ class EventListWithStatusAPIView(APIView):
         if event_date >= today:
             return "AGENDADO"
 
-        # Evento já passou da data
-        if service_orders.count() == 0:
-            # Evento passou da data e não possui nenhuma OS vinculada
+        # Evento passou da data e não possui nenhuma OS vinculada
+        if event.orders_total == 0:
             return "CANCELADO"
 
-        # Verificar status das OS vinculadas
-        os_finalizadas = service_orders.filter(
-            service_order_phase__name="FINALIZADO"
-        ).count()
-
-        os_em_andamento = service_orders.filter(
-            service_order_phase__name__in=[
-                "PENDENTE",
-                "EM_PRODUCAO",
-                "AGUARDANDO_RETIRADA",
-                "AGUARDANDO_DEVOLUCAO",
-            ]
-        ).count()
-
         # Se todas as OS foram finalizadas
-        if os_finalizadas == service_orders.count():
+        if event.orders_finished == event.orders_total:
             return "FINALIZADO"
 
         # Se ainda há OS em andamento após a data do evento
-        if os_em_andamento > 0:
+        if event.orders_in_progress > 0:
             return "POSSUI PENDÊNCIAS"
 
         # Caso geral - evento passou e tem OS mas não finalizadas corretamente

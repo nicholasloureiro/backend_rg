@@ -7,6 +7,7 @@ import re
 from django.contrib.auth import authenticate
 from django.contrib.auth.models import User
 from django.core.paginator import Paginator, EmptyPage
+from django.shortcuts import get_object_or_404
 from django.db import models
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import OpenApiExample, OpenApiParameter, extend_schema
@@ -1033,6 +1034,43 @@ class ClientSearchAPIView(APIView):
             )
 
 
+MAX_CLIENT_PAGE_SIZE = 200
+
+
+def _latest_dated_or_highest_id(records):
+    """Registro mais recente com date_created; sem nenhum datado, o de maior id."""
+    records = list(records)
+    dated = [record for record in records if record.date_created is not None]
+    if dated:
+        return max(dated, key=lambda record: (record.date_created, record.id))
+    return max(records, key=lambda record: record.id, default=None)
+
+
+def _client_summary(client):
+    """Dados do cliente nas respostas de listagem e detalhe."""
+    contact = _latest_dated_or_highest_id(client.contacts.all())
+    address = _latest_dated_or_highest_id(client.personsadresses_set.all())
+    return {
+        "id": client.id,
+        "name": client.name,
+        "cpf": client.cpf,
+        "email": contact.email if contact else "",
+        "phone": contact.phone if contact else "",
+        "address": (
+            {
+                "street": address.street,
+                "number": address.number,
+                "neighborhood": address.neighborhood,
+                "city": address.city.name,
+                "cep": address.cep,
+                "complemento": address.complemento,
+            }
+            if address
+            else None
+        ),
+    }
+
+
 @extend_schema(
     tags=["accounts"],
     summary="Lista de clientes",
@@ -1062,6 +1100,18 @@ class ClientSearchAPIView(APIView):
     ],
     responses={200: ClientListSerializer},
 )
+class ClientDetailAPIView(APIView):
+    permission_classes = [IsAuthenticated]
+
+    def get(self, request, person_id):
+        client = get_object_or_404(
+            Person.objects.prefetch_related("contacts", "personsadresses_set__city"),
+            id=person_id,
+            person_type__type="CLIENTE",
+        )
+        return Response(_client_summary(client))
+
+
 class ClientListAPIView(APIView):
     permission_classes = [IsAuthenticated]
 
@@ -1084,8 +1134,12 @@ class ClientListAPIView(APIView):
                 page_size = 50
 
             # Buscar todos os clientes
-            clients = Person.objects.filter(person_type__type="CLIENTE").select_related(
-                "person_type"
+            page_size = min(page_size, MAX_CLIENT_PAGE_SIZE)
+
+            clients = (
+                Person.objects.filter(person_type__type="CLIENTE")
+                .select_related("person_type")
+                .prefetch_related("contacts", "personsadresses_set__city")
             )
 
             # Pesquisa livre
@@ -1111,47 +1165,7 @@ class ClientListAPIView(APIView):
 
             data = []
             for client in page_obj.object_list:
-                # Buscar contato mais recente baseado em date_created
-                contact = (
-                    client.contacts.filter(date_created__isnull=False)
-                    .order_by("-date_created", "-id")
-                    .first()
-                )
-                if not contact:
-                    # Se não houver contato com date_created, buscar o mais recente por ID
-                    contact = client.contacts.order_by("-id").first()
-
-                # Buscar endereço mais recente baseado em date_created
-                address = (
-                    client.personsadresses_set.filter(date_created__isnull=False)
-                    .order_by("-date_created", "-id")
-                    .first()
-                )
-                if not address:
-                    # Se não houver endereço com date_created, buscar o mais recente por ID
-                    address = client.personsadresses_set.order_by("-id").first()
-
-                client_data = {
-                    "id": client.id,
-                    "name": client.name,
-                    "cpf": client.cpf,
-                    "email": contact.email if contact else "",
-                    "phone": contact.phone if contact else "",
-                    "address": (
-                        {
-                            "street": address.street if address else "",
-                            "number": address.number if address else "",
-                            "neighborhood": address.neighborhood if address else "",
-                            "city": address.city.name if address else "",
-                            "cep": address.cep if address else "",
-                            "complemento": address.complemento if address else "",
-                        }
-                        if address
-                        else None
-                    ),
-                }
-
-                data.append(client_data)
+                data.append(_client_summary(client))
 
             response = {
                 "count": paginator.count,

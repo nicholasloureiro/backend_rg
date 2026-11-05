@@ -635,17 +635,12 @@ class ColorListAPIView(APIView):
 
     def get(self, request):
         """Lista todas as cores e combinações possíveis com intensidades"""
-        from .models import Color, ColorCatalogue, ColorIntensity
+        from .models import ColorCatalogue, ColorIntensity
 
         # Buscar todas as cores do catálogo ordenadas alfabeticamente
         colors = ColorCatalogue.objects.all().order_by("description")
         # Buscar todas as intensidades ordenadas alfabeticamente
         intensities = ColorIntensity.objects.all().order_by("description")
-        # Buscar todas as combinações existentes
-        color_combinations = Color.objects.select_related(
-            "color", "color_intensity"
-        ).all()
-
         result = []
 
         # 1. Adicionar cores sem intensidade (apenas do catálogo)
@@ -661,29 +656,13 @@ class ColorListAPIView(APIView):
         # 2. Adicionar todas as combinações possíveis de cor + intensidade
         for color in colors:
             for intensity in intensities:
-                # Verificar se esta combinação existe na tabela Color
-                existing_combo = color_combinations.filter(
-                    color=color, color_intensity=intensity
-                ).first()
-
-                if existing_combo:
-                    # Combinação existe - usar dados reais
-                    result.append(
-                        {
-                            "color": color.description,
-                            "intensity": intensity.description,
-                            "combined": f"{color.description} {intensity.description}",
-                        }
-                    )
-                else:
-                    # Combinação não existe - criar virtual
-                    result.append(
-                        {
-                            "color": color.description,
-                            "intensity": intensity.description,
-                            "combined": f"{color.description} {intensity.description}",
-                        }
-                    )
+                result.append(
+                    {
+                        "color": color.description,
+                        "intensity": intensity.description,
+                        "combined": f"{color.description} {intensity.description}",
+                    }
+                )
 
         # Ordenar o resultado final alfabeticamente por cor e depois por intensidade
         result.sort(key=lambda x: (x["color"], x["intensity"] or ""))

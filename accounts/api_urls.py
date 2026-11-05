@@ -7,6 +7,7 @@ from django.urls import path
 from .api_views import (
     CitySearchAPIView,
     ClientDeleteAPIView,
+    ClientDetailAPIView,
     ClientListAPIView,
     ClientRegisterAPIView,
     ClientSearchAPIView,
@@ -64,6 +65,7 @@ urlpatterns = [
     ),
     path("clients/list/", ClientListAPIView.as_view(), name="api_client_list"),
     path("clients/search/", ClientSearchAPIView.as_view(), name="api_client_search"),
+    path("clients/<int:person_id>/", ClientDetailAPIView.as_view(), name="api_client_detail"),
     path(
         "clients/<int:person_id>/delete/",
         ClientDeleteAPIView.as_view(),
