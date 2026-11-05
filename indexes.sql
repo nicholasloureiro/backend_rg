@@ -5,6 +5,15 @@
 -- ============================================================================
 
 -- ============================================================================
+-- TIER 0: SERVICE_ORDERS — Abas de /ordens (listagem V2 e phase-counts)
+-- Igualdade (fase) antes da ordenação; sem OS virtuais, que as abas nunca mostram.
+-- Rode fora de transação (sem psql -1): CONCURRENTLY não bloqueia escrita.
+-- ============================================================================
+CREATE INDEX CONCURRENTLY IF NOT EXISTS idx_so_phase_live_date
+ON service_orders (service_order_phase_id, order_date DESC, id DESC)
+WHERE is_virtual = false;
+
+-- ============================================================================
 -- TIER 1: SERVICE_ORDERS — Critical compound indexes (dashboard, reports)
 -- ============================================================================
 
